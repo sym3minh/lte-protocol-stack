@@ -1,0 +1,6 @@
+# Added by code-review-graph
+.code-review-graph/
+.vscode
+.claude
+.mcp.json
+CLAUDE.md
