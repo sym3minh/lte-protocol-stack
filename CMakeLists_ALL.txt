@@ -1,0 +1,170 @@
+This file is used to allow Claude AI to view the contents of the remaining CMakeLists.txt and .cmake files in the project.
+
+#lte-stack/CMakeLists.txt (It has been added to the files section in the Claude Project.)
+
+----------------------------------------------------------------------------------
+#lte-stack/metrics/CMakeLists.txt
+add_library(lte_metrics STATIC src/metrics_collector.cpp)
+target_include_directories(lte_metrics PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+----------------------------------------------------------------------------------
+#lte-stack/src/common/CMakeLists.txt
+add_library(lte_common STATIC src/buffer_pool.cpp)
+target_include_directories(lte_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+----------------------------------------------------------------------------------
+#lte-stack/src/pdcp/CMakeLists.txt
+set(PDCP_SOURCES
+    src/pdcp_entity.cpp
+    src/pdcp_pdu.cpp
+    src/pdcp_rohc.cpp
+    src/pdcp_security.cpp
+    src/pdcp_rx_am_noreorder.cpp
+)
+add_library(lte_pdcp STATIC ${PDCP_SOURCES})
+target_include_directories(lte_pdcp PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(lte_pdcp PUBLIC lte_common lte_metrics)
+
+----------------------------------------------------------------------------------
+#lte-stack/src/CMakeLists.txt
+add_subdirectory(common)
+add_subdirectory(pdcp)
+
+----------------------------------------------------------------------------------
+# lte-stack/tests/fixtures/CMakeLists.txt
+
+add_library(test_fixtures INTERFACE)
+
+target_include_directories(test_fixtures
+    INTERFACE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+# test_fixtures needs access to production headers to compile helper code
+target_link_libraries(test_fixtures
+    INTERFACE
+        lte_pdcp
+        lte_common
+)
+
+----------------------------------------------------------------------------------
+# lte-stack/tests/integration/CMakeLists.txt
+
+lte_add_unit_test(
+    NAME    pdcp_loopback_test
+    SOURCES pdcp_loopback_test.cpp
+    LIBS    lte_pdcp lte_common
+    LABELS  "integration;pdcp"
+)
+
+add_custom_target(integration_tests
+    DEPENDS
+        pdcp_loopback_test
+)
+
+----------------------------------------------------------------------------------
+# lte-stack/tests/unit/common/CMakeLists.txt
+
+lte_add_unit_test(
+    NAME    buffer_pool_test
+    SOURCES buffer_pool_test.cpp
+    LIBS    lte_common
+    LABELS  "unit;common"
+)
+
+lte_add_unit_test(
+    NAME    metrics_test
+    SOURCES metrics_test.cpp
+    LIBS    lte_metrics
+    LABELS  "unit;common"
+)
+
+add_custom_target(common_unit_tests
+    DEPENDS
+        buffer_pool_test
+        metrics_test
+)
+
+----------------------------------------------------------------------------------
+# lte-stack/tests/unit/pdcp/CMakeLists.txt
+
+lte_add_unit_test(
+    NAME    pdcp_tx_test
+    SOURCES pdcp_tx_test.cpp
+    LIBS    lte_pdcp lte_common
+    LABELS  "unit;pdcp"
+)
+
+lte_add_unit_test(
+    NAME    pdcp_rx_am_noreorder_test
+    SOURCES pdcp_rx_am_noreorder_test.cpp
+    LIBS    lte_pdcp lte_common lte_metrics test_fixtures
+    LABELS  "unit;pdcp"
+)
+
+add_custom_target(pdcp_unit_tests
+    DEPENDS
+        pdcp_tx_test
+        pdcp_rx_am_noreorder_test
+)
+
+----------------------------------------------------------------------------------
+# lte-stack/tests/CMakeLists.txt
+
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/AddUnitTest.cmake)
+
+add_subdirectory(fixtures)
+
+add_subdirectory(unit/common)
+add_subdirectory(unit/pdcp)
+
+add_subdirectory(integration)
+
+add_custom_target(all_unit_tests
+    DEPENDS
+        common_unit_tests
+        pdcp_unit_tests
+)
+
+add_custom_target(all_tests
+    DEPENDS
+        all_unit_tests
+        integration_tests
+)
+
+----------------------------------------------------------------------------------
+# lte-stack/tests/cmake/AddUnitTest.cmake
+
+include(GoogleTest)
+
+function(lte_add_unit_test)
+    set(options "")
+    set(oneValueArgs NAME)
+    set(multiValueArgs SOURCES LIBS LABELS)
+    cmake_parse_arguments(T "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+
+    if(NOT T_NAME)
+        message(FATAL_ERROR "lte_add_unit_test: NAME is required")
+    endif()
+    if(NOT T_SOURCES)
+        message(FATAL_ERROR "lte_add_unit_test: SOURCES is required")
+    endif()
+
+    add_executable(${T_NAME} ${T_SOURCES})
+
+    target_link_libraries(${T_NAME}
+        PRIVATE
+            GTest::gtest
+            GTest::gtest_main
+            GTest::gmock
+            test_fixtures
+            ${T_LIBS}
+    )
+
+    gtest_discover_tests(${T_NAME}
+        PROPERTIES
+            LABELS  "${T_LABELS}"
+            TIMEOUT 30
+        DISCOVERY_MODE PRE_TEST
+    )
+endfunction()
