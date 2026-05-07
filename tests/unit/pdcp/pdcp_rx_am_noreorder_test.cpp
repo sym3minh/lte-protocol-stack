@@ -24,37 +24,18 @@
 #include "pdcp_security.h"
 #include "pdcp_rohc.h"
 #include "metrics_collector.h"
+#include "test_helpers.h"
 
 #include <vector>
 #include <string>
 #include <cstdint>
 
 using namespace lte;
+using lte::test::buildRawPdu;
 
 // ============================================================
 // Shared test infrastructure
 // ============================================================
-
-// buildRawPdu — serialise a PDCP Data PDU with a given SN and
-// payload into a byte vector.  Used to feed rxPdu() directly.
-static std::vector<uint8_t> buildRawPdu(SN_t sn,
-                                        const std::string &payload,
-                                        BearerType bearer = BearerType::DRB)
-{
-  const size_t hdr = PdcpPduCodec::headerSize(bearer);
-  std::vector<uint8_t> buf(hdr + payload.size());
-
-  PdcpPdu pdu;
-  pdu.sn = sn;
-  pdu.dc = PDCP_DC_DATA;
-  pdu.bearer = bearer;
-  pdu.payload = reinterpret_cast<const uint8_t *>(payload.data());
-  pdu.payload_len = payload.size();
-
-  size_t written = PdcpPduCodec::serialize(pdu, buf.data(), buf.size());
-  buf.resize(written);
-  return buf;
-}
 
 // ProcFixture — creates real sub-components and a PdcpRxAmNoReorder
 // with spec-default initial state (rx_next=0, rx_hfn=0,

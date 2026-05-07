@@ -1,24 +1,62 @@
-#tests
-set(TEST_SOURCES
-    pdcp_loopback_test.cpp
-    pdcp_tx_test.cpp
-    buffer_pool_test.cpp
-    metrics_test.cpp
-    pdcp_rx_am_noreorder_test.cpp
-)
-add_executable(lte_test ${TEST_SOURCES})
-target_link_libraries(lte_test PRIVATE 
-    lte_pdcp
-    GTest::gtest
-    GTest::gtest_main
-    Threads::Threads
+# =============================================================================
+# tests/
+# Orchestration-only — does NOT define any target directly.
+# All test targets are defined in sub-directories.
+#
+# Directory layout
+# ----------------
+# tests/
+#   cmake/AddUnitTest.cmake   ← shared helper; included here once
+#   fixtures/                 ← INTERFACE lib: test_fixtures
+#   unit/
+#     common/                 ← BufferPool, Metrics
+#     pdcp/                   ← PDCP TX, RX AM/UM
+#   integration/              ← cross-layer loopback etc.
+#   benchmarks/               ← (future) throughput regression
+#
+# Quick-reference commands
+# ------------------------
+# Build & run all unit tests:
+#   cmake --build build --target all_unit_tests
+#   ctest --test-dir build -L unit -j8 --output-on-failure
+#
+# Build & run one module:
+#   cmake --build build --target pdcp_unit_tests
+#   ctest --test-dir build -L pdcp
+#
+# Build & run integration only:
+#   cmake --build build --target integration_tests
+#   ctest --test-dir build -L integration
+#
+# Run a single test case:
+#   ctest --test-dir build -R "PdcpTx\.SequenceNumberStartsAtZero"
+#
+# Skip benchmarks:
+#   ctest --test-dir build -LE benchmark
+# =============================================================================
+
+# Load helper once — all sub-directories inherit this function.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/AddUnitTest.cmake)
+
+# Shared test fixtures library must be defined before any test target.
+add_subdirectory(fixtures)
+
+# ---- Unit tests (fast, isolated, mock all deps) ----------------------------
+add_subdirectory(unit/common)
+add_subdirectory(unit/pdcp)
+
+# ---- Integration tests (cross-layer, slower) --------------------------------
+add_subdirectory(integration)
+
+# ---- Top-level meta-targets -------------------------------------------------
+add_custom_target(all_unit_tests
+    DEPENDS
+        common_unit_tests
+        pdcp_unit_tests
 )
 
-# Register each test file as a CTest suite (so `ctest` can run them
-include(GoogleTest)
-gtest_discover_tests(lte_test
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-    PROPERTIES        TIMEOUT 60
-    DISCOVERY_TIMEOUT 60
-    DISCOVERY_MODE    POST_BUILD      # POST_BUILD is required with MinGW
+add_custom_target(all_tests
+    DEPENDS
+        all_unit_tests
+        integration_tests
 )
