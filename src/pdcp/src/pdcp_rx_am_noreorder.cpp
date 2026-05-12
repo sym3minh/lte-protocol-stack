@@ -272,7 +272,7 @@ Status PdcpRxAmNoReorder::rxPdu(const uint8_t* raw_pdu,
         rx_deliv_ = static_cast<SN_t>(count % mod);
 
         // Record delivery metrics (latency = 0 for now; no tx_ts in procedure scope)
-        deps_.metrics.recordRx(payload.size(), 0, MetricsCollector::now_ns());
+        deps_.metrics.recordRx(payload.size(), 0, deps_.metrics.now_ns());
 
         if (deps_.deliver_cb) {
             deps_.deliver_cb(payload.data(), payload.size());

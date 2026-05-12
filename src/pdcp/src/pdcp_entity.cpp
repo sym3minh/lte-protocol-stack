@@ -123,7 +123,7 @@ Status PdcpEntity::txSdu(const uint8_t* sdu, size_t sdu_len)
 
     // Step 4: record tx timestamp keyed by COUNT before SN advances
     const uint32_t tx_count = countValue(tx_hfn_, tx_next_);
-    tx_ts_map_[tx_count] = MetricsCollector::now_ns();
+    tx_ts_map_[tx_count] = metrics_.now_ns();
 
     PdcpPdu pdu;
     pdu.sn          = tx_next_;

@@ -58,4 +58,54 @@ enum class Status : uint8_t {
     NOT_IMPLEMENTED  = 5   // returned by stub RX procedures
 };
 
+// ============================================================
+// RLC-specific types  (TS 36.322)
+// ============================================================
+
+// ------------------------------------------------------------
+// RlcSnSize — sequence number bit-width per TS 36.322 §6.2.1
+//
+//   UM: SN5 (5-bit, for SRB-like use) or SN10 (10-bit, DTCH)
+//   AM: SN10 (10-bit) in LTE; SN16 reserved for future / 5G NR
+// ------------------------------------------------------------
+enum class RlcSnSize : uint8_t {
+    SN5  = 5,   // UM only  — 32 sequence numbers
+    SN10 = 10,  // UM / AM  — 1024 sequence numbers
+    SN12 = 12,  // (reserved for future extension)
+    SN16 = 16,  // (reserved — used in 5G NR UM)
+};
+
+// Helper: modulus for a given SN size (2^N)
+inline uint32_t rlcSnModulus(RlcSnSize s)
+{
+    return 1u << static_cast<uint8_t>(s);
+}
+
+// ------------------------------------------------------------
+// LogicalChannel — TS 36.321 §6.1.1
+//
+// Determines scheduling priority and which RLC mode is allowed.
+//   CCCH : Common Control  — mapped to TM only
+//   DCCH : Dedicated Control — SRB1/SRB2, mapped to AM
+//   DTCH : Dedicated Traffic — DRB, mapped to UM or AM
+//   PCCH : Paging — downlink only, TM
+//   BCCH : Broadcast — downlink only, TM
+// ------------------------------------------------------------
+enum class LogicalChannel : uint8_t {
+    CCCH = 0,
+    DCCH = 1,
+    DTCH = 2,
+    PCCH = 3,
+    BCCH = 4,
+};
+
+// ------------------------------------------------------------
+// Timer sentinel — used by RLC entities to represent "no timer"
+//
+// TimerManager will use uint32_t handle IDs.  This sentinel
+// value indicates that a handle is not currently active,
+// analogous to a null pointer.
+// ------------------------------------------------------------
+constexpr uint32_t INVALID_TIMER_ID = UINT32_MAX;
+
 } // namespace lte

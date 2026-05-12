@@ -43,6 +43,7 @@ add_subdirectory(fixtures)
 
 # ---- Unit tests (fast, isolated, mock all deps) ----------------------------
 add_subdirectory(unit/common)
+add_subdirectory(unit/metrics)
 add_subdirectory(unit/pdcp)
 
 # ---- Integration tests (cross-layer, slower) --------------------------------

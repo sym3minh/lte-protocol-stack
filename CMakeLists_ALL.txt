@@ -1,19 +1,23 @@
 This file is used to allow Claude AI to view the contents of the remaining CMakeLists.txt and .cmake files in the project.
 
-#lte-stack/CMakeLists.txt (It has been added to the files section in the Claude Project.)
+#source/CMakeLists.txt (It has been added to the files section in the Claude Project.)
 
 ----------------------------------------------------------------------------------
-#lte-stack/metrics/CMakeLists.txt
+#source/src/metrics/CMakeLists.txt
 add_library(lte_metrics STATIC src/metrics_collector.cpp)
 target_include_directories(lte_metrics PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(lte_metrics PUBLIC lte_common)
 
 ----------------------------------------------------------------------------------
-#lte-stack/src/common/CMakeLists.txt
-add_library(lte_common STATIC src/buffer_pool.cpp)
+#source/src/common/CMakeLists.txt
+add_library(lte_common STATIC 
+            src/buffer_pool.cpp
+            src/clock.cpp
+            src/byte_buffer.cpp)
 target_include_directories(lte_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 ----------------------------------------------------------------------------------
-#lte-stack/src/pdcp/CMakeLists.txt
+#source/src/pdcp/CMakeLists.txt
 set(PDCP_SOURCES
     src/pdcp_entity.cpp
     src/pdcp_pdu.cpp
@@ -26,12 +30,13 @@ target_include_directories(lte_pdcp PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(lte_pdcp PUBLIC lte_common lte_metrics)
 
 ----------------------------------------------------------------------------------
-#lte-stack/src/CMakeLists.txt
+#source/src/CMakeLists.txt
 add_subdirectory(common)
+add_subdirectory(metrics)
 add_subdirectory(pdcp)
 
 ----------------------------------------------------------------------------------
-# lte-stack/tests/fixtures/CMakeLists.txt
+# source/tests/fixtures/CMakeLists.txt
 
 add_library(test_fixtures INTERFACE)
 
@@ -48,7 +53,7 @@ target_link_libraries(test_fixtures
 )
 
 ----------------------------------------------------------------------------------
-# lte-stack/tests/integration/CMakeLists.txt
+# source/tests/integration/CMakeLists.txt
 
 lte_add_unit_test(
     NAME    pdcp_loopback_test
@@ -63,7 +68,7 @@ add_custom_target(integration_tests
 )
 
 ----------------------------------------------------------------------------------
-# lte-stack/tests/unit/common/CMakeLists.txt
+# source/tests/unit/common/CMakeLists.txt
 
 lte_add_unit_test(
     NAME    buffer_pool_test
@@ -73,20 +78,37 @@ lte_add_unit_test(
 )
 
 lte_add_unit_test(
-    NAME    metrics_test
-    SOURCES metrics_test.cpp
-    LIBS    lte_metrics
+    NAME    byte_buffer_test
+    SOURCES byte_buffer_test.cpp
+    LIBS    lte_common
+    LABELS  "unit;common"
+)
+
+lte_add_unit_test(
+    NAME    clock_test
+    SOURCES clock_test.cpp
+    LIBS    lte_common
     LABELS  "unit;common"
 )
 
 add_custom_target(common_unit_tests
     DEPENDS
         buffer_pool_test
-        metrics_test
+        byte_buffer_test
+        clock_test
 )
 
 ----------------------------------------------------------------------------------
-# lte-stack/tests/unit/pdcp/CMakeLists.txt
+# source/tests/unit/metrics/CMakeLists.txt
+lte_add_unit_test(
+    NAME    metrics_test
+    SOURCES metrics_test.cpp
+    LIBS    lte_metrics
+    LABELS  "unit;metrics"
+)
+
+----------------------------------------------------------------------------------
+# source/tests/unit/pdcp/CMakeLists.txt
 
 lte_add_unit_test(
     NAME    pdcp_tx_test
@@ -109,13 +131,14 @@ add_custom_target(pdcp_unit_tests
 )
 
 ----------------------------------------------------------------------------------
-# lte-stack/tests/CMakeLists.txt
+# source/tests/CMakeLists.txt
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/AddUnitTest.cmake)
 
 add_subdirectory(fixtures)
 
 add_subdirectory(unit/common)
+add_subdirectory(unit/metrics)
 add_subdirectory(unit/pdcp)
 
 add_subdirectory(integration)
@@ -133,7 +156,7 @@ add_custom_target(all_tests
 )
 
 ----------------------------------------------------------------------------------
-# lte-stack/tests/cmake/AddUnitTest.cmake
+# source/tests/cmake/AddUnitTest.cmake
 
 include(GoogleTest)
 
@@ -157,7 +180,6 @@ function(lte_add_unit_test)
             GTest::gtest
             GTest::gtest_main
             GTest::gmock
-            test_fixtures
             ${T_LIBS}
     )
 

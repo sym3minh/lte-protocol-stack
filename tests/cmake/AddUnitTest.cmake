@@ -39,7 +39,6 @@ function(lte_add_unit_test)
             GTest::gtest
             GTest::gtest_main
             GTest::gmock
-            test_fixtures
             ${T_LIBS}
     )
 
@@ -47,6 +46,7 @@ function(lte_add_unit_test)
         PROPERTIES
             LABELS  "${T_LABELS}"
             TIMEOUT 30
+        DISCOVERY_TIMEOUT 60
         DISCOVERY_MODE PRE_TEST
     )
 endfunction()

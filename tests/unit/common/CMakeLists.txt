@@ -22,14 +22,22 @@ lte_add_unit_test(
 )
 
 lte_add_unit_test(
-    NAME    metrics_test
-    SOURCES metrics_test.cpp
-    LIBS    lte_metrics
+    NAME    byte_buffer_test
+    SOURCES byte_buffer_test.cpp
+    LIBS    lte_common
+    LABELS  "unit;common"
+)
+
+lte_add_unit_test(
+    NAME    clock_test
+    SOURCES clock_test.cpp
+    LIBS    lte_common
     LABELS  "unit;common"
 )
 
 add_custom_target(common_unit_tests
     DEPENDS
         buffer_pool_test
-        metrics_test
+        byte_buffer_test
+        clock_test
 )
