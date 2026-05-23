@@ -16,70 +16,71 @@
 //   With MockClock, tests fast-forward 100 ms instantly via
 //   clk.advance_ms(100) without any sleep.
 //
-// Naming:
-//   We use `Clock` (no I- prefix) for the abstract base, matching
-//   the codebase convention (BufferPool, ByteBuffer, …).
 // ============================================================
 
 #include <cstdint>
 #include <chrono>
 
-namespace lte {
+namespace lte
+{
 
-// ============================================================
-// Clock — pure interface
-// ============================================================
-class Clock {
-public:
+  // ============================================================
+  // Clock — pure interface
+  // ============================================================
+  class Clock
+  {
+  public:
     virtual ~Clock() = default;
 
     // Returns current time in nanoseconds (monotonic).
     virtual uint64_t now_ns() const = 0;
-};
+  };
 
-// ============================================================
-// RealClock — wraps std::chrono::steady_clock
-//
-// USAGE POLICY (IMPORTANT):
-//   RealClock::instance() exists ONLY as a fallback for components
-//   that pre-date the Clock abstraction (currently only
-//   MetricsCollector — see RLC_ARCHITECTURE_DECISIONS.md §7).
-//
-//   New code (RLC entities, PDCP timer-driven flows, RadioBearer)
-//   MUST receive a Clock& through their constructor. Do NOT call
-//   RealClock::instance() inside any new entity — doing so makes
-//   that code untestable with MockClock and defeats the purpose
-//   of the abstraction.
-// ============================================================
-class RealClock final : public Clock {
-public:
+  // ============================================================
+  // RealClock — wraps std::chrono::steady_clock
+  //
+  // USAGE POLICY (IMPORTANT):
+  //   RealClock::instance() exists ONLY as a fallback for components
+  //   that pre-date the Clock abstraction (currently only
+  //   MetricsCollector — see RLC_ARCHITECTURE_DECISIONS.md §7).
+  //
+  //   New code (RLC entities, PDCP timer-driven flows, RadioBearer)
+  //   MUST receive a Clock& through their constructor. Do NOT call
+  //   RealClock::instance() inside any new entity — doing so makes
+  //   that code untestable with MockClock and defeats the purpose
+  //   of the abstraction.
+  // ============================================================
+  class RealClock final : public Clock
+  {
+  public:
     // Fallback accessor — see USAGE POLICY above.
     // Prefer constructor injection of Clock& everywhere else.
-    static RealClock& instance();
+    static RealClock &instance();
 
     uint64_t now_ns() const override;
 
     // Non-copyable, non-movable — singleton
-    RealClock(const RealClock&)            = delete;
-    RealClock& operator=(const RealClock&) = delete;
+    RealClock(const RealClock &) = delete;
+    RealClock &operator=(const RealClock &) = delete;
 
-private:
+  private:
     RealClock() = default;
-};
+  };
 
-// ============================================================
-// MockClock — deterministic clock for unit tests
-//
-// Starts at t = 0 ns.  Tests control time explicitly:
-//   MockClock clk;
-//   clk.advance_ms(100);   // "jumps" 100 ms with no sleep
-//   assert(clk.now_ns() == 100'000'000ULL);
-//
-// Thread-safety: NOT thread-safe — single-threaded test use only.
-// In Phase 1 all entities are single-threaded, so this is fine.
-// ============================================================
-class MockClock final : public Clock {
-public:
+  // ============================================================
+  // MockClock — deterministic clock for unit tests
+  //
+  // Starts at t = 0 ns.  Tests control time explicitly:
+  //   MockClock clk;
+  //   clk.advance_ms(100);   // "jumps" 100 ms with no sleep
+  //   assert(clk.now_ns() == 100'000'000ULL);
+  //
+  // Thread-safety: NOT thread-safe — single-threaded test use only.
+  // In Phase 1 all entities are single-threaded, so this is fine.
+  // ============================================================
+  class MockClock final : public Clock
+  {
+  public:
     MockClock() = default;
     explicit MockClock(uint64_t initial_ns) : current_ns_(initial_ns) {}
 
@@ -96,8 +97,8 @@ public:
     // Reset to zero
     void reset() { current_ns_ = 0; }
 
-private:
+  private:
     uint64_t current_ns_ = 0;
-};
+  };
 
 } // namespace lte

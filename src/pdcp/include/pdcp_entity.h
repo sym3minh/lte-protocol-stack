@@ -6,16 +6,20 @@
 //
 // Responsibilities:
 //   TX path : SN assignment → RoHC compress → cipher → PDU build
-//   RX path : delegate entirely to IPdcpRxProcedure strategy object
+//   RX path : dispatch to mode-specific private method via rx_mode_
 //
 // RX mode is selected at construction time via RxMode enum and
 // cannot be changed at runtime (mode is fixed by RRC DRB config).
 //
-// TX state (tx_next_, tx_hfn_) and all sub-components
-// (pool_, rohc_, security_, metrics_) remain here.
-// RX state variables (rx_next_, rx_hfn_, rx_deliv_) have been
-// moved to the concrete procedure class; entity exposes them
-// through pass-through accessors.
+// All TX and RX state variables live directly in this class.
+// Mode dispatch is via a switch in rxPduDispatch(); the three
+// mode handlers are implemented in separate compilation units:
+//   pdcp_entity_rx_am.cpp   — §5.1.2.1.2 AM no-reorder
+//   pdcp_entity_rx_um.cpp   — §5.1.2.1.3 UM no-reorder  (stub)
+//   pdcp_entity_rx_reorder.cpp — §5.1.2.1.4 with reorder (stub)
+//
+// Design: srsRAN-style mega-class (pdcp_entity_lte.cc).
+//   No Strategy pattern, no IPdcpRxProcedure, no Deps struct.
 // ============================================================
 
 #include "common_types.h"
@@ -24,7 +28,6 @@
 #include "pdcp_rohc.h"
 #include "pdcp_security.h"
 #include "metrics_collector.h"
-#include "pdcp_rx_procedure.h"
 
 #include <cstdint>
 #include <cstddef>
@@ -41,10 +44,44 @@ namespace lte {
 using SduDeliverCallback = std::function<void(const uint8_t* sdu, size_t len)>;
 using PduForwardCallback = std::function<void(const uint8_t* pdu, size_t len)>;
 
+// ------------------------------------------------------------
+// RxClassification — 5-case branching per TS 36.323 §5.1.2.1.2
+//
+// Used by PdcpEntity::classifyRx() to map each received SN to
+// exactly one spec branch.  Named enumerators match the spec's
+// language to allow side-by-side code review against the standard.
+// ------------------------------------------------------------
+enum class RxClassification : uint8_t {
+    OutsideWindow,    // Case A: out-of-window → decipher+decompress, discard
+    WrapAhead,        // Case B: Next – received > Reordering_Window → HFN+1
+    LateFromPrevHfn,  // Case C: received – Next >= Reordering_Window → HFN-1
+    ForwardInWindow,  // Case D: received >= Next (normal forward path)
+    BehindSameHfn     // Case E: received < Next (in-order late arrival)
+};
+
+// ------------------------------------------------------------
+// RxStoreContainer — reordering / re-establishment buffer
+//
+// Key   = COUNT (= HFN × SN_modulus + SN), NOT raw SN.
+//         Two PDUs with the same SN but different HFN (wrap-around
+//         boundary) must be distinguishable for correct ascending-
+//         COUNT delivery required by the spec.
+// Value = decoded SDU bytes (after decipher + ROHC decompress).
+//
+// std::map chosen because:
+//   1. Spec requires delivery in ascending COUNT order →
+//      ordered iteration is a natural fit.
+//   2. At steady state the buffer is almost always empty, so
+//      the log-n overhead vs O(1) is negligible.
+//   3. Range-erase (lower_bound + erase) is O(log n + k) which
+//      is efficient for batch flush.
+// ------------------------------------------------------------
+using RxStoreContainer = std::map<uint32_t, std::vector<uint8_t>>;
+
 class PdcpEntity {
 public:
     // ----------------------------------------------------------
-    // RxMode — selects which §5.1.2.1.x procedure to instantiate
+    // RxMode — selects which §5.1.2.1.x handler to dispatch to
     //
     // AmNoReorder  §5.1.2.1.2  DRBs on RLC AM, no reordering  [IMPLEMENTED]
     // UmNoReorder  §5.1.2.1.3  DRBs on RLC UM, no reordering  [STUB]
@@ -56,20 +93,44 @@ public:
         WithReorder    // §5.1.2.1.4
     };
 
+    // ----------------------------------------------------------
+    // TestInitState — used only by the test constructor below.
+    // Allows unit tests to seed arbitrary RX/TX state without
+    // driving thousands of loopback PDUs to reach wrap-around.
+    // NOT intended for production use.
+    // ----------------------------------------------------------
+    struct TestInitState {
+        SN_t     rx_next;   // Next_PDCP_RX_SN
+        uint32_t rx_hfn;    // RX_HFN
+        SN_t     rx_deliv;  // Last_Submitted_PDCP_RX_SN
+        SN_t     tx_next;   // Next_PDCP_TX_SN
+        uint32_t tx_hfn;    // TX_HFN
+    };
+
     // lcid    : Logical Channel ID
     // bearer  : SRB1 / SRB2 / DRB
     // rlc_mode: RLC mode below (affects SN size / discard behaviour)
     // pool    : shared buffer pool (must outlive this entity)
-    // rx_mode : which RX procedure to use (default = AmNoReorder)
+    // rx_mode : which RX handler to use (default = AmNoReorder)
     PdcpEntity(LCID_t     lcid,
                BearerType bearer,
                RlcMode    rlc_mode,
                BufferPool& pool,
                RxMode     rx_mode = RxMode::AmNoReorder);
 
+    // TEST-ONLY: bypass §5.2.2.1 defaults — seed arbitrary RX/TX state.
+    // Delegates to normal ctor for sub-component init, then overrides
+    // state variables with caller-provided values.
+    PdcpEntity(LCID_t     lcid,
+               BearerType bearer,
+               RlcMode    rlc_mode,
+               BufferPool& pool,
+               RxMode     rx_mode,
+               TestInitState init);
+
     ~PdcpEntity();
 
-    // Non-copyable — owns pool references and unique_ptr state
+    // Non-copyable — owns pool references and sub-component state
     PdcpEntity(const PdcpEntity&)             = delete;
     PdcpEntity& operator=(const PdcpEntity&)  = delete;
 
@@ -84,17 +145,17 @@ public:
     void setDeliverCallback(SduDeliverCallback cb);
 
     // ----------------------------------------------------------
-    // Transmit path (upper → lower)  — unchanged from prior revision
+    // Transmit path (upper → lower)
     // ----------------------------------------------------------
 
     // Accept an SDU from RRC/IP layer, wrap it in a PDCP PDU,
-    // and invoke the tx_callback with the serialised PDU bytes.
+    // and invoke tx_cb_ with the serialised PDU bytes.
     // Returns Status::OK on success, Status::POOL_EXHAUSTED if
     // no buffer is available.
     Status txSdu(const uint8_t* sdu, size_t sdu_len);
 
     // ----------------------------------------------------------
-    // Receive path (lower → upper)  — delegates to rx_proc_
+    // Receive path (lower → upper)
     // ----------------------------------------------------------
 
     // Accept a raw PDU from RLC.
@@ -105,24 +166,31 @@ public:
                  size_t         raw_len,
                  bool           due_to_reestablishment = false)
     {
-        return rx_proc_->rxPdu(raw_pdu, raw_len, due_to_reestablishment);
+        return rxPduDispatch(raw_pdu, raw_len, due_to_reestablishment);
     }
 
     // ----------------------------------------------------------
     // Re-establishment (TS 36.323 §5.2.2)
     // ----------------------------------------------------------
-    void reestablish() { rx_proc_->reestablish(); }
+    void reestablish()
+    {
+        switch (rx_mode_) {
+            case RxMode::AmNoReorder: reestablishAm();          break;
+            case RxMode::UmNoReorder: reestablishUm();          break;
+            case RxMode::WithReorder: reestablishWithReorder(); break;
+        }
+    }
 
     // ----------------------------------------------------------
     // State variable accessors (TS 36.323 §7.1)
     // ----------------------------------------------------------
     SN_t     txNext()  const { return tx_next_; }   // Next_PDCP_TX_SN
-    uint32_t txHfn()   const { return tx_hfn_; }    // TX_HFN
+    uint32_t txHfn()   const { return tx_hfn_;  }   // TX_HFN
 
-    // RX accessors — pass-through to procedure object
-    SN_t     rxNext()  const { return rx_proc_->rxNext();  }  // Next_PDCP_RX_SN
-    uint32_t rxHfn()   const { return rx_proc_->rxHfn();   }  // RX_HFN
-    SN_t     rxDeliv() const { return rx_proc_->rxDeliv(); }  // Last_Submitted_PDCP_RX_SN
+    // RX accessors — direct member access (no pass-through overhead)
+    SN_t     rxNext()  const { return rx_next_;  }  // Next_PDCP_RX_SN
+    uint32_t rxHfn()   const { return rx_hfn_;   }  // RX_HFN
+    SN_t     rxDeliv() const { return rx_deliv_; }  // Last_Submitted_PDCP_RX_SN
 
     // Compute the full 32-bit COUNT for any SN + HFN pair
     // COUNT = HFN × SN_modulus + SN  (TS 36.323 §6.3.5)
@@ -159,6 +227,7 @@ private:
     LCID_t     lcid_;
     BearerType bearer_;
     RlcMode    rlc_mode_;
+    RxMode     rx_mode_;    // Stored RX mode — drives dispatch switch
 
     // ----------------------------------------------------------
     // TX state variables (TS 36.323 §7.1)
@@ -170,15 +239,28 @@ private:
     uint32_t tx_hfn_  = 0;
 
     // ----------------------------------------------------------
-    // RX procedure — owns one concrete IPdcpRxProcedure instance.
-    // RX state (rx_next_, rx_hfn_, rx_deliv_) and RX logic live
-    // inside the procedure object; entity exposes them via
-    // pass-through accessors above.
+    // RX state variables (TS 36.323 §7.1)
+    //
+    //   Next_PDCP_RX_SN          — next expected SN
+    //   RX_HFN                   — upper part of COUNT on the Rx side
+    //   Last_Submitted_PDCP_RX_SN — SN of last SDU delivered upward
+    //
+    // Initialised per §5.2.2.1 in normal ctor:
+    //   rx_next_ = 0, rx_hfn_ = 0, rx_deliv_ = snModulus - 1
     // ----------------------------------------------------------
-    std::unique_ptr<IPdcpRxProcedure> rx_proc_;
+    SN_t     rx_next_;   // Next_PDCP_RX_SN
+    uint32_t rx_hfn_;    // RX_HFN
+    SN_t     rx_deliv_;  // Last_Submitted_PDCP_RX_SN
 
     // ----------------------------------------------------------
-    // Sub-components (owned by entity; shared with rx_proc_ via Deps refs)
+    // RX reordering / re-establishment buffer
+    // Key = COUNT (not SN) — see RxStoreContainer rationale in
+    //       pdcp_rx_types.h
+    // ----------------------------------------------------------
+    RxStoreContainer rx_store_;
+
+    // ----------------------------------------------------------
+    // Sub-components (owned by entity)
     // ----------------------------------------------------------
     BufferPool&      pool_;
     PdcpRohc         rohc_;
@@ -210,6 +292,33 @@ private:
     // TX helper
     // ----------------------------------------------------------
     SN_t nextTxSn();
+
+    // ----------------------------------------------------------
+    // RX dispatch — called by public rxPdu()
+    // ----------------------------------------------------------
+
+    // Top-level dispatcher: routes to mode-specific handler
+    Status rxPduDispatch(const uint8_t* raw_pdu, size_t raw_len,
+                         bool due_to_reestablishment);
+
+    // Mode-specific handlers (implemented in 3 separate .cpp files)
+    Status rxPduAmNoReorder(const uint8_t* raw_pdu, size_t raw_len,
+                            bool due_to_reestablishment);   // pdcp_entity_rx_am.cpp
+    Status rxPduUmNoReorder(const uint8_t* raw_pdu, size_t raw_len,
+                            bool due_to_reestablishment);   // pdcp_entity_rx_um.cpp
+    Status rxPduWithReorder(const uint8_t* raw_pdu, size_t raw_len,
+                            bool due_to_reestablishment);   // pdcp_entity_rx_reorder.cpp
+
+    // Shared helpers (implemented in pdcp_entity_rx_am.cpp — used by all modes)
+    RxClassification classifyRx(SN_t sn, uint32_t& out_hfn) const;
+    std::vector<uint8_t> decipherAndDecompress(const PdcpPdu& pdu,
+                                               uint32_t hfn_for_decipher);
+
+    // Re-establishment helpers (one per mode)
+    void reestablishAm();                   // pdcp_entity_rx_am.cpp
+    void reestablishAmWithStoredContext();  // pdcp_entity_rx_am.cpp
+    void reestablishUm();                   // pdcp_entity_rx_um.cpp
+    void reestablishWithReorder();          // pdcp_entity_rx_reorder.cpp
 };
 
 } // namespace lte
