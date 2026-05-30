@@ -45,6 +45,7 @@ add_subdirectory(fixtures)
 add_subdirectory(unit/common)
 add_subdirectory(unit/metrics)
 add_subdirectory(unit/pdcp)
+add_subdirectory(unit/rlc)
 
 # ---- Integration tests (cross-layer, slower) --------------------------------
 add_subdirectory(integration)
@@ -54,6 +55,7 @@ add_custom_target(all_unit_tests
     DEPENDS
         common_unit_tests
         pdcp_unit_tests
+        rlc_unit_tests
 )
 
 add_custom_target(all_tests

@@ -22,21 +22,28 @@ source/
 │   │   │   └── metrics_collector.h
 │   │   └── src/
 │   │       └── metrics_collector.cpp
-│   └── pdcp/
+│   ├── pdcp/
+│   │   ├── CMakeLists.txt
+│   │   ├── include/
+│   │   │   ├── pdcp_entity.h
+│   │   │   ├── pdcp_pdu.h
+│   │   │   ├── pdcp_rohc.h
+│   │   │   └── pdcp_security.h
+│   │   └── src/
+│   │       ├── pdcp_entity.cpp
+│   │       ├── pdcp_pdu.cpp
+│   │       ├── pdcp_rohc.cpp
+│   │       ├── pdcp_security.cpp
+│   │       ├── pdcp_entity_rx_am.cpp
+│   │       ├── pdcp_entity_rx_um.cpp
+│   │       └── pdcp_entity_rx_reorder.cpp
+│   └── rlc/
 │       ├── CMakeLists.txt
 │       ├── include/
-│       │   ├── pdcp_entity.h
-│       │   ├── pdcp_pdu.h
-│       │   ├── pdcp_rohc.h
-│       │   └── pdcp_security.h
+│       │   └── rlc_pdu.h
 │       └── src/
-│           ├── pdcp_entity.cpp
-│           ├── pdcp_pdu.cpp
-│           ├── pdcp_rohc.cpp
-│           ├── pdcp_security.cpp
-│           ├── pdcp_entity_rx_am.cpp
-│           ├── pdcp_entity_rx_um.cpp
-│           └── pdcp_entity_rx_reorder.cpp
+│           └── rlc_pdu.cpp
+│
 └── tests/
     ├── CMakeLists.txt
     ├── cmake/
@@ -57,6 +64,9 @@ source/
         ├── metrics/
         │   ├── CMakeLists.txt
         │   └── metrics_test.cpp
+        ├── rlc/
+        │   ├── CMakeLists.txt
+        │   └── rlc_pdu_test.cpp
         └── pdcp/
             ├── CMakeLists.txt
             ├── pdcp_rx_am_noreorder_test.cpp

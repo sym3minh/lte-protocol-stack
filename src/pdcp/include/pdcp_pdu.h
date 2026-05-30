@@ -2,7 +2,6 @@
 #include "common_types.h"
 #include <cstdint>
 #include <cstddef>
-#include <vector>
 
 namespace lte
 {
@@ -44,8 +43,6 @@ namespace lte
 
     const uint8_t *payload = nullptr; // points into BufferPool block
     size_t payload_len = 0;
-
-    uint64_t tx_timestamp_ns = 0; // set at txSdu() for latency calc
 
     bool isData() const { return dc == PDCP_DC_DATA; }
     bool isControl() const { return dc == PDCP_DC_CONTROL; }

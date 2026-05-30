@@ -32,10 +32,19 @@ target_include_directories(lte_pdcp PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(lte_pdcp PUBLIC lte_common lte_metrics)
 
 ----------------------------------------------------------------------------------
+#source/src/rlc/CMakeLists.txt
+add_library(lte_rlc STATIC
+    src/rlc_pdu.cpp
+)
+target_include_directories(lte_rlc PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(lte_rlc PUBLIC lte_common lte_metrics)
+
+----------------------------------------------------------------------------------
 #source/src/CMakeLists.txt
 add_subdirectory(common)
 add_subdirectory(metrics)
 add_subdirectory(pdcp)
+add_subdirectory(rlc)
 
 ----------------------------------------------------------------------------------
 # source/tests/fixtures/CMakeLists.txt
@@ -141,22 +150,42 @@ add_custom_target(pdcp_unit_tests
 )
 
 ----------------------------------------------------------------------------------
+# source/tests/unit/rlc/CMakeLists.txt
+lte_add_unit_test(
+    NAME    rlc_pdu_test
+    SOURCES rlc_pdu_test.cpp
+    LIBS    lte_rlc lte_common
+    LABELS "unit;rlc"
+)
+
+add_custom_target(rlc_unit_tests
+    DEPENDS
+        rlc_pdu_test
+)
+
+----------------------------------------------------------------------------------
 # source/tests/CMakeLists.txt
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/AddUnitTest.cmake)
 
+# Shared test fixtures library must be defined before any test target.
 add_subdirectory(fixtures)
 
+# ---- Unit tests (fast, isolated, mock all deps) ----
 add_subdirectory(unit/common)
 add_subdirectory(unit/metrics)
 add_subdirectory(unit/pdcp)
+add_subdirectory(unit/rlc)
 
+# ---- Integration tests (cross-layer, slower) --------
 add_subdirectory(integration)
 
+# ---- Top-level meta-targets -------------------------
 add_custom_target(all_unit_tests
     DEPENDS
         common_unit_tests
         pdcp_unit_tests
+        rlc_unit_tests
 )
 
 add_custom_target(all_tests
