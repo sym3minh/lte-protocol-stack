@@ -18,6 +18,7 @@ throughput, latency, and packet loss rate directly.
 
 ## Architecture
 
+```
 +--------------------------------------------------+
 |                  Application                     |
 +--------------------------------------------------+
@@ -45,7 +46,7 @@ throughput, latency, and packet loss rate directly.
 |  Transport Block scheduling  |  Loss model       |
 |  TTI tick  |  HARQ simulation                    |
 +--------------------------------------------------+
-
+```
 ---
 
 ## References
