@@ -126,10 +126,18 @@ lte_add_unit_test(
     LABELS  "unit;pdcp"
 )
 
+lte_add_unit_test(
+    NAME    pdcp_rx_um_noreorder_test
+    SOURCES pdcp_rx_um_noreorder_test.cpp
+    LIBS    lte_pdcp lte_common lte_metrics test_fixtures
+    LABELS  "unit;pdcp"
+)
+
 add_custom_target(pdcp_unit_tests
     DEPENDS
         pdcp_tx_test
         pdcp_rx_am_noreorder_test
+        pdcp_rx_um_noreorder_test
 )
 
 ----------------------------------------------------------------------------------
