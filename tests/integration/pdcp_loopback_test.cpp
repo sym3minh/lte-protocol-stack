@@ -1,27 +1,66 @@
+// ============================================================
+// pdcp_loopback_test.cpp — Integration test: TX → RX on same entity
+//
+// Simulates the path:
+//   App → txSdu(ByteBuffer) → [PDCP PDU via MockRlcSap] → rxPdu(ByteBuffer) → App
+//
+// Refactored for zero-copy SAP:
+//   - PdcpConfig struct
+//   - txSdu(ByteBuffer), rxPdu(ByteBuffer)
+//   - MockRlcSap captures TX PDU; test re-injects as ByteBuffer for RX
+//   - lastDeliveredSdu() used for RX verification (application boundary)
+// ============================================================
+
 #include <gtest/gtest.h>
 #include "pdcp_entity.h"
+#include "test_helpers.h"
+
 #include <string>
 #include <vector>
 
 using namespace lte;
+using namespace lte::test;
 
-// ============================================================
-// Loopback fixture — one PdcpEntity acts as both Tx and Rx.
-// This simulates the path:
-//   "Minh" → txSdu() → [PDU bytes] → rxPdu() → "Minh"
-// ============================================================
 class PdcpLoopbackTest : public ::testing::Test
 {
 protected:
   void SetUp() override
   {
-    pool = std::make_unique<BufferPool>(2048, 32);
-    entity = std::make_unique<PdcpEntity>(
-        /*lcid=*/1, BearerType::DRB, RlcMode::AM, *pool);
+    pool_ = std::make_unique<BufferPool>(2048, 64);
+
+    PdcpConfig cfg;
+    cfg.lcid = 1;
+    cfg.bearer = BearerType::DRB;
+    cfg.pdu_type = PdcpPduType::DRB_12bitSn;
+    cfg.rlc_mode = RlcMode::AM;
+    cfg.reordering_enabled = false;
+
+    entity_ = std::make_unique<PdcpEntity>(cfg);
+    entity_->set_lower_layer_sap(&mock_rlc_);
   }
 
-  std::unique_ptr<BufferPool> pool;
-  std::unique_ptr<PdcpEntity> entity;
+  // Transmit an SDU and get the raw PDU bytes captured by MockRlcSap
+  std::vector<uint8_t> txAndCapture(const std::string &payload)
+  {
+    auto sdu = makeSduBuffer(*pool_, payload);
+    EXPECT_TRUE(sdu.valid());
+    Status s = entity_->txSdu(std::move(sdu));
+    EXPECT_EQ(s, Status::OK);
+    return mock_rlc_.last_sdu;
+  }
+
+  // Re-inject captured PDU bytes as a ByteBuffer into rxPdu
+  Status reinjectPdu(const std::vector<uint8_t> &pdu_bytes)
+  {
+    auto buf = ByteBuffer::allocate(*pool_, pdu_bytes.size(), DEFAULT_HEADROOM);
+    EXPECT_TRUE(buf.valid());
+    buf.append(pdu_bytes.data(), pdu_bytes.size());
+    return entity_->rxPdu(std::move(buf));
+  }
+
+  std::unique_ptr<BufferPool> pool_;
+  MockRlcSap mock_rlc_;
+  std::unique_ptr<PdcpEntity> entity_;
 };
 
 // ------------------------------------------------------------
@@ -29,30 +68,17 @@ protected:
 // ------------------------------------------------------------
 TEST_F(PdcpLoopbackTest, SimpleStringMinh)
 {
-  const std::string input = "Minh";
+  auto pdu_bytes = txAndCapture("Minh");
+  ASSERT_GT(pdu_bytes.size(), 0u);
 
-  // Tx: wrap "Minh" into a PDCP PDU
-  Status s = entity->txSdu(
-      reinterpret_cast<const uint8_t *>(input.data()),
-      input.size());
-  ASSERT_EQ(s, Status::OK) << "txSdu failed";
+  Status s = reinjectPdu(pdu_bytes);
+  ASSERT_EQ(s, Status::OK);
 
-  // The PDU is stored in lastTxPdu() for test access
-  const auto &pdu_bytes = entity->lastTxPdu();
-  ASSERT_GT(pdu_bytes.size(), 0u) << "PDU is empty";
-
-  // Rx: feed the raw PDU back into the same entity
-  s = entity->rxPdu(pdu_bytes.data(), pdu_bytes.size());
-  ASSERT_EQ(s, Status::OK) << "rxPdu failed";
-
-  // Check what came out the other side
-  const auto &delivered = entity->lastDeliveredSdu();
-  ASSERT_EQ(delivered.size(), input.size())
-      << "Delivered SDU length mismatch";
+  const auto &delivered = entity_->lastDeliveredSdu();
+  ASSERT_EQ(delivered.size(), 4u);
 
   std::string output(delivered.begin(), delivered.end());
-  EXPECT_EQ(output, input)
-      << "Expected \"" << input << "\", got \"" << output << "\"";
+  EXPECT_EQ(output, "Minh");
 }
 
 // ------------------------------------------------------------
@@ -62,15 +88,10 @@ TEST_F(PdcpLoopbackTest, VietnameseString)
 {
   const std::string input = "Xin chào thế giới";
 
-  ASSERT_EQ(entity->txSdu(
-                reinterpret_cast<const uint8_t *>(input.data()), input.size()),
-            Status::OK);
+  auto pdu_bytes = txAndCapture(input);
+  ASSERT_EQ(reinjectPdu(pdu_bytes), Status::OK);
 
-  ASSERT_EQ(entity->rxPdu(
-                entity->lastTxPdu().data(), entity->lastTxPdu().size()),
-            Status::OK);
-
-  const auto &delivered = entity->lastDeliveredSdu();
+  const auto &delivered = entity_->lastDeliveredSdu();
   std::string output(delivered.begin(), delivered.end());
   EXPECT_EQ(output, input);
 }
@@ -81,17 +102,17 @@ TEST_F(PdcpLoopbackTest, VietnameseString)
 TEST_F(PdcpLoopbackTest, BinaryPayload)
 {
   const std::vector<uint8_t> input = {
-      0x45, 0x00, 0x00, 0x28, // IP header (version, IHL, DSCP, length)
-      0xAB, 0xCD, 0x40, 0x00, // identification, flags, frag offset
-      0x40, 0x11, 0x00, 0x00  // TTL, protocol=UDP, checksum
-  };
+      0x45, 0x00, 0x00, 0x28,
+      0xAB, 0xCD, 0x40, 0x00,
+      0x40, 0x11, 0x00, 0x00};
 
-  ASSERT_EQ(entity->txSdu(input.data(), input.size()), Status::OK);
-  ASSERT_EQ(entity->rxPdu(
-                entity->lastTxPdu().data(), entity->lastTxPdu().size()),
-            Status::OK);
+  auto sdu = makeSduBuffer(*pool_, input.data(), input.size());
+  ASSERT_TRUE(sdu.valid());
+  ASSERT_EQ(entity_->txSdu(std::move(sdu)), Status::OK);
 
-  const auto &delivered = entity->lastDeliveredSdu();
+  ASSERT_EQ(reinjectPdu(mock_rlc_.last_sdu), Status::OK);
+
+  const auto &delivered = entity_->lastDeliveredSdu();
   ASSERT_EQ(delivered.size(), input.size());
   EXPECT_EQ(delivered, input);
 }
@@ -101,16 +122,23 @@ TEST_F(PdcpLoopbackTest, BinaryPayload)
 // ------------------------------------------------------------
 TEST_F(PdcpLoopbackTest, EmptySduIsRejected)
 {
-  EXPECT_EQ(entity->txSdu(nullptr, 0), Status::PARSE_ERROR);
+  // Default-constructed ByteBuffer is invalid
+  ByteBuffer empty;
+  EXPECT_EQ(entity_->txSdu(std::move(empty)), Status::PARSE_ERROR);
 }
 
 TEST_F(PdcpLoopbackTest, EmptyPduIsRejected)
 {
-  EXPECT_EQ(entity->rxPdu(nullptr, 0), Status::PARSE_ERROR);
+  ByteBuffer empty;
+  EXPECT_EQ(entity_->rxPdu(std::move(empty)), Status::PARSE_ERROR);
 }
 
 TEST_F(PdcpLoopbackTest, TruncatedPduRejected)
 {
-  const uint8_t bad[] = {0x80}; // only 1 byte, needs at least 2 for 12-bit SN
-  EXPECT_EQ(entity->rxPdu(bad, sizeof(bad)), Status::PARSE_ERROR);
+  // Only 1 byte — needs at least 2 for 12-bit SN header
+  const uint8_t bad[] = {0x80};
+  auto buf = ByteBuffer::allocate(*pool_, sizeof(bad), DEFAULT_HEADROOM);
+  ASSERT_TRUE(buf.valid());
+  buf.append(bad, sizeof(bad));
+  EXPECT_EQ(entity_->rxPdu(std::move(buf)), Status::PARSE_ERROR);
 }

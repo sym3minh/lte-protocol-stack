@@ -20,7 +20,7 @@
 lte_add_unit_test(
     NAME    pdcp_loopback_test
     SOURCES pdcp_loopback_test.cpp
-    LIBS    lte_pdcp lte_common
+    LIBS    lte_pdcp lte_common test_fixtures
     LABELS  "integration;pdcp"
 )
 

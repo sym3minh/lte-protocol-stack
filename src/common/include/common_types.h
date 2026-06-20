@@ -11,19 +11,6 @@ namespace lte
 {
 
   // ------------------------------------------------------------
-  // Sequence number type (12-bit for DRB, 5-bit for SRB)
-  // Using uint16_t to hold up to 12-bit values
-  // ------------------------------------------------------------
-  using SN_t = uint16_t;
-  using LCID_t = uint8_t;
-
-  // SN window sizes per TS 36.323 §7.1
-  constexpr SN_t SN_MAX_12BIT = 4096;             // 2^12, for DRB
-  constexpr SN_t SN_MAX_5BIT = 32;                // 2^5,  for SRB
-  constexpr SN_t SN_WINDOW_12 = SN_MAX_12BIT / 2; // 2048
-  constexpr SN_t SN_WINDOW_5 = SN_MAX_5BIT / 2;   // 16
-
-  // ------------------------------------------------------------
   // Bearer / channel types
   // ------------------------------------------------------------
   enum class BearerType : uint8_t
@@ -32,24 +19,6 @@ namespace lte
     SRB2 = 1, // Signalling Radio Bearer 2 (RRC + NAS)
     DRB = 2   // Data Radio Bearer (user data)
   };
-
-  enum class RlcMode : uint8_t
-  {
-    TM = 0, // Transparent Mode
-    UM = 1, // Unacknowledged Mode
-    AM = 2  // Acknowledged Mode
-  };
-
-  // SN length derived from bearer type
-  inline SN_t snModulus(BearerType b)
-  {
-    return (b == BearerType::DRB) ? SN_MAX_12BIT : SN_MAX_5BIT;
-  }
-
-  inline SN_t snWindow(BearerType b)
-  {
-    return (b == BearerType::DRB) ? SN_WINDOW_12 : SN_WINDOW_5;
-  }
 
   // ------------------------------------------------------------
   // Result codes
@@ -62,14 +31,58 @@ namespace lte
     BUFFER_FULL = 3,
     PARSE_ERROR = 4,
     NOT_IMPLEMENTED = 5, // returned by stub RX procedures
-    // ── RLC codec ──
+    // RLC codec
     INVALID_LI = 6,     // LI (Length Indicator) list malformed
     RESERVED_VALUE = 7, // field uses reserved value
+    // ByteBuffer
+    HeaderRoomExhausted = 8,
   };
+
+  // ------------------------------------------------------------
+  // Sequence number type
+  // Using uint32_t to hold up to 16-bit values
+  // ------------------------------------------------------------
+  using SN_t = uint32_t;
+  using LCID_t = uint8_t;
+
+  // PDCP SN sizes per TS 36.323 §7.1
+  constexpr SN_t SN_MAX_12BIT = 4096; // 2^12, for DRB long SN
+  constexpr SN_t SN_MAX_5BIT = 32;    // 2^5,  for SRB
+
+  enum class PdcpPduType : uint8_t
+  {
+    SRB,
+    DRB_7bitSn,
+    DRB_12bitSn,
+  };
+
+  // SN length derived from bearer type
+  inline SN_t pdcpSnModulus(PdcpPduType type)
+  {
+    switch (type)
+    {
+    case PdcpPduType::SRB:
+      return SN_MAX_5BIT;
+    case PdcpPduType::DRB_12bitSn:
+      return SN_MAX_12BIT;
+    }
+    return 0;
+  }
+
+  inline SN_t pdcpSnWindow(PdcpPduType type)
+  {
+    return pdcpSnModulus(type) >> 1; // Divide by 2
+  }
 
   // ============================================================
   // RLC-specific types  (TS 36.322)
   // ============================================================
+  enum class RlcMode : uint8_t
+  {
+    TM = 0, // Transparent Mode
+    UM = 1, // Unacknowledged Mode
+    AM = 2  // Acknowledged Mode
+  };
 
   // ------------------------------------------------------------
   // RlcSnSize — sequence number bit-width per TS 36.322 §6.2.1
@@ -86,9 +99,9 @@ namespace lte
   };
 
   // Helper: modulus for a given SN size (2^N)
-  inline uint32_t rlcSnModulus(RlcSnSize s)
+  inline SN_t rlcSnModulus(RlcSnSize s)
   {
-    return 1u << static_cast<uint8_t>(s);
+    return static_cast<SN_t>(1) << static_cast<uint8_t>(s);
   }
 
   // ------------------------------------------------------------

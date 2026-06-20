@@ -4,7 +4,7 @@
 // "DRBs mapped on RLC UM, reordering function not used"
 // Ref: TS 36.323 §5.1.2.1.3
 //
-// STATUS: stub — rxPduUmNoReorder returns NOT_IMPLEMENTED.
+// STATUS: stub — rxPduDrbUmNoReorder returns NOT_IMPLEMENTED.
 //
 // TODO: implement §5.1.2.1.3 in a future revision.
 //   Key differences from AM path (§5.1.2.1.2):
@@ -19,11 +19,10 @@ namespace lte
 {
 
   // ============================================================
-  // rxPduUmNoReorder — TS 36.323 §5.1.2.1.3
+  // rxPduDrbUmNoReorder — TS 36.323 §5.1.2.1.3
   // ============================================================
-  Status PdcpEntity::rxPduUmNoReorder(const uint8_t *raw_pdu,
-                                      size_t raw_len,
-                                      bool due_to_reestablishment)
+  Status PdcpEntity::rxPduDrbUmNoReorder(ByteBuffer pdu,
+                                         bool due_to_reestablishment)
   {
     // Unlike §5.1.2.1.2 (AM no-reorder), there is NO separate branch for
     // re-establishment in §5.1.2.1.3. UM does not buffer SDUs across
@@ -31,32 +30,39 @@ namespace lte
     //
     // Therefore the flag is accepted but intentionally ignored.
     (void)due_to_reestablishment;
-    if (!raw_pdu || raw_len == 0)
+    if (!pdu.valid() || pdu.size() == 0)
       return Status::PARSE_ERROR;
 
-    PdcpPdu pdu;
-    Status parse_status = PdcpPduCodec::deserialize(raw_pdu, raw_len, bearer_, pdu);
+    PdcpHeader hdr;
+    Status parse_status = PdcpPduCodec::parseHeader(pdu.data(), pdu.size(),
+                                                    pduType(), hdr);
     if (parse_status != Status::OK)
     {
       metrics_.recordDrop();
       return parse_status;
     }
-    if (!pdu.isData())
+    if (!hdr.isData())
     {
       // Control PDU — not handled by this procedure
       return Status::OK;
     }
 
-    if (pdu.sn < rx_next_)
+    // Advance head pointer, remove header bytes from the data area.
+    // After consume(), pdu.data() points directly to the payload.
+    // Header bytes remain within the block but outside [head_, tail_).
+    pdu.consume(hdr.header_size);
+
+    // HFN update
+    if (hdr.sn < rx_next_)
     {
       rx_hfn_++;
     }
 
-    std::vector<uint8_t> sdu = decipherAndDecompress(pdu, rx_hfn_);
+    decipherAndDecompress(pdu, rx_hfn_);
 
-    const SN_t max_sn = static_cast<SN_t>(snModulus(bearer_) - 1);
+    const SN_t max_sn = static_cast<SN_t>(pdcpSnModulus(pduType()) - 1);
     // spec literal; alternatively, can write the condition like RxClassification::ForwardInWindow in pdcp_entity_rx_am.cpp
-    rx_next_ = static_cast<SN_t>(pdu.sn + 1);
+    rx_next_ = static_cast<SN_t>(hdr.sn + 1);
     if (rx_next_ > max_sn)
     {
       rx_next_ = 0;
@@ -64,14 +70,14 @@ namespace lte
     }
 
     // Record delivery metrics (latency = 0 for now; tx_ts lookup reserved)
-    metrics_.recordRx(sdu.size(), 0, metrics_.now_ns());
+    metrics_.recordRx(pdu.size(), 0, metrics_.now_ns());
 
     // Populate test-only last-delivered storage
-    last_delivered_sdu_.assign(sdu.begin(), sdu.end());
+    last_delivered_sdu_.assign(pdu.data(), pdu.data() + pdu.size());
 
     if (deliver_cb_)
     {
-      deliver_cb_(sdu.data(), sdu.size());
+      deliver_cb_(pdu.data(), pdu.size());
     }
 
     return Status::OK;

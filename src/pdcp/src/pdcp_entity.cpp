@@ -19,15 +19,11 @@ namespace lte
   //   RX_HFN                   = 0
   //   Last_Submitted_PDCP_RX_SN = Maximum_PDCP_SN  (= snModulus - 1)
   // ============================================================
-  PdcpEntity::PdcpEntity(LCID_t lcid,
-                         BearerType bearer,
-                         RlcMode rlc_mode,
-                         BufferPool &pool,
-                         RxMode rx_mode)
-      : lcid_(lcid), bearer_(bearer), rlc_mode_(rlc_mode), rx_mode_(rx_mode), tx_next_(0), tx_hfn_(0), rx_next_(0), rx_hfn_(0)
+  PdcpEntity::PdcpEntity(PdcpConfig cfg)
+      : cfg_(cfg), tx_next_(0), tx_hfn_(0), rx_next_(0), rx_hfn_(0)
         // TS 36.323 §5.2.2.1: "set Last_Submitted_PDCP_RX_SN to Maximum_PDCP_SN"
         ,
-        rx_deliv_(static_cast<SN_t>(snModulus(bearer) - 1)), pool_(pool)
+        rx_deliv_(static_cast<SN_t>(pdcpSnModulus(cfg.pdu_type) - 1))
   {
   }
 
@@ -40,13 +36,9 @@ namespace lte
   // init logic while still allowing arbitrary starting conditions
   // for wrap-around and boundary tests.
   // ============================================================
-  PdcpEntity::PdcpEntity(LCID_t lcid,
-                         BearerType bearer,
-                         RlcMode rlc_mode,
-                         BufferPool &pool,
-                         RxMode rx_mode,
+  PdcpEntity::PdcpEntity(PdcpConfig cfg,
                          TestInitState init)
-      : PdcpEntity(lcid, bearer, rlc_mode, pool, rx_mode) // delegate
+      : PdcpEntity(cfg) // delegate
   {
     // Override RX state with test-supplied values
     rx_next_ = init.rx_next;
@@ -63,7 +55,7 @@ namespace lte
   // ============================================================
   // setDeliverCallback
   //
-  // Stored directly on the entity; rxPduAmNoReorder (and future
+  // Stored directly on the entity; rxPduDrbAmNoReorder (and future
   // mode handlers) call deliver_cb_ directly — no lambda wrapper
   // needed since there is no intermediate procedure object.
   // ============================================================
@@ -78,18 +70,19 @@ namespace lte
   // Called by the public inline rxPdu().  Returning NOT_IMPLEMENTED
   // for stub modes satisfies the compiler's return requirement.
   // ============================================================
-  Status PdcpEntity::rxPduDispatch(const uint8_t *raw_pdu,
-                                   size_t raw_len,
+  Status PdcpEntity::rxPduDispatch(ByteBuffer pdu,
                                    bool due_to_reestablishment)
   {
-    switch (rx_mode_)
+    if (cfg_.bearer != BearerType::DRB)
+      return Status::NOT_IMPLEMENTED;
+    if (cfg_.reordering_enabled)
+      return rxPduWithReorder(std::move(pdu), due_to_reestablishment);
+    switch (cfg_.rlc_mode)
     {
-    case RxMode::AmNoReorder:
-      return rxPduAmNoReorder(raw_pdu, raw_len, due_to_reestablishment);
-    case RxMode::UmNoReorder:
-      return rxPduUmNoReorder(raw_pdu, raw_len, due_to_reestablishment);
-    case RxMode::WithReorder:
-      return rxPduWithReorder(raw_pdu, raw_len, due_to_reestablishment);
+    case RlcMode::AM:
+      return rxPduDrbAmNoReorder(std::move(pdu), due_to_reestablishment);
+    case RlcMode::UM:
+      return rxPduDrbUmNoReorder(std::move(pdu), due_to_reestablishment);
     }
     return Status::NOT_IMPLEMENTED; // unreachable — satisfies compiler
   }
@@ -108,55 +101,41 @@ namespace lte
   //
   // TX path is unchanged from the Strategy-pattern revision.
   // ============================================================
-  Status PdcpEntity::txSdu(const uint8_t *sdu, size_t sdu_len)
+  Status PdcpEntity::txSdu(ByteBuffer sdu)
   {
-    if (!sdu || sdu_len == 0 || sdu_len > PDCP_MAX_SDU_SIZE)
+    if (!sdu.valid() || sdu.size() == 0 || sdu.size() > PDCP_MAX_SDU_SIZE)
       return Status::PARSE_ERROR;
 
-    const size_t header_sz = PdcpPduCodec::headerSize(bearer_);
-    const size_t needed = header_sz + sdu_len + 4; // +4 future MAC-I
+    const size_t header_sz = PdcpPduCodec::headerSize(pduType());
+    if (sdu.headroom() < header_sz)
+      return Status::HeaderRoomExhausted;
 
-    if (needed > pool_.blockSize())
-      return Status::POOL_EXHAUSTED;
-
-    uint8_t *block = pool_.allocate();
-    if (!block)
-    {
-      metrics_.recordDrop();
-      return Status::POOL_EXHAUSTED;
-    }
-
-    // Place SDU right after where the header will go
-    std::memcpy(block + header_sz, sdu, sdu_len);
-    size_t payload_len = sdu_len;
+    const SN_t sn = tx_next_;
 
     // Step 2: RoHC (stub: no-op) — affects SDU header only
-    rohc_.compress(block + header_sz, payload_len);
+    rohc_.compress(sdu.data(), sdu.size());
 
     // Step 3: ciphering using COUNT = TX_HFN × modulus + tx_next_
-    const bool is_srb = (bearer_ != BearerType::DRB);
-    security_.applyCiphering(block + header_sz, payload_len, tx_next_, is_srb);
+    const bool is_srb = (bearer() != BearerType::DRB);
+    security_.applyCiphering(sdu.data(), sdu.size(), sn, is_srb);
 
     // Step 4: record tx timestamp keyed by COUNT before SN advances
     const uint32_t tx_count = countValue(tx_hfn_, tx_next_);
     tx_ts_map_[tx_count] = metrics_.now_ns();
 
-    PdcpPdu pdu;
-    pdu.sn = tx_next_;
-    pdu.dc = PDCP_DC_DATA;
-    pdu.bearer = bearer_;
-    pdu.payload = block + header_sz;
-    pdu.payload_len = payload_len;
+    // Step 5: prepend PDCP header
+    PdcpHeader hdr_pdu;
+    hdr_pdu.sn = sn;
 
-    size_t serialised_len = PdcpPduCodec::serialize(pdu, block, pool_.blockSize());
-    if (serialised_len == 0)
+    uint8_t hdr_buf[MAX_PDCP_HEADER_SIZE];
+    size_t hdr_len = PdcpPduCodec::buildHeader(hdr_pdu, hdr_buf, pduType());
+    if (!sdu.prepend(hdr_buf, hdr_len))
     {
-      pool_.deallocate(block);
-      return Status::PARSE_ERROR;
+      return Status::HeaderRoomExhausted;
     }
 
-    // Step 5: advance Next_PDCP_TX_SN + TX_HFN per spec §5.1.1
-    const SN_t max_sn = static_cast<SN_t>(snModulus(bearer_) - 1);
+    // Step 6: advance Next_PDCP_TX_SN + TX_HFN per spec §5.1.1
+    const SN_t max_sn = static_cast<SN_t>(pdcpSnModulus(pduType()) - 1);
     if (tx_next_ >= max_sn)
     {
       tx_next_ = 0;
@@ -167,13 +146,14 @@ namespace lte
       ++tx_next_;
     }
 
-    metrics_.recordTx(serialised_len);
-    last_tx_pdu_.assign(block, block + serialised_len);
+    metrics_.recordTx(sdu.size());
 
-    if (tx_cb_)
-      tx_cb_(block, serialised_len);
+    // ── Step 7: submit xuống RLC ────────────────────────────
+    if (lower_dn_)
+    {
+      lower_dn_->handle_sdu(std::move(sdu), sn);
+    }
 
-    pool_.deallocate(block);
     return Status::OK;
   }
 
@@ -190,24 +170,9 @@ namespace lte
   // cover the entire PDU including the header — reserved for
   // future implementation.
   // ============================================================
-  std::vector<uint8_t>
-  PdcpEntity::decipherAndDecompress(const PdcpPdu &pdu, uint32_t hfn_for_decipher)
+  void PdcpEntity::decipherAndDecompress(ByteBuffer &pdu, uint32_t hfn_for_decipher)
   {
     (void)hfn_for_decipher; // available for future real cipher; stub ignores it
-
-    std::vector<uint8_t> work(pdu.payload, pdu.payload + pdu.payload_len);
-
-    const bool is_srb = (bearer_ != BearerType::DRB);
-    security_.applyDeciphering(work.data(), work.size(), pdu.sn, is_srb);
-
-    // If applying Integrity Verification, it would affect the entire PDU
-    // (PDCP header + Data field).  Reserved for future revision.
-
-    size_t decompressed_len = work.size();
-    rohc_.decompress(work.data(), decompressed_len);
-    work.resize(decompressed_len);
-
-    return work;
   }
 
   // ============================================================
@@ -231,7 +196,7 @@ namespace lte
   {
     // Kept for potential future use; txSdu() manages SN inline.
     SN_t sn = tx_next_;
-    const SN_t max_sn = static_cast<SN_t>(snModulus(bearer_) - 1);
+    const SN_t max_sn = static_cast<SN_t>(pdcpSnModulus(pduType()) - 1);
     if (tx_next_ >= max_sn)
     {
       tx_next_ = 0;

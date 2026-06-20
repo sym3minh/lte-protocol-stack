@@ -7,7 +7,7 @@
 // Implements the following PdcpEntity private methods:
 //   classifyRx()                   — HFN selection + window check
 //   decipherAndDecompress()        — shared decipher+ROHC helper
-//   rxPduAmNoReorder()             — main §5.1.2.1.2 receive procedure
+//   rxPduDrbAmNoReorder()             — main §5.1.2.1.2 receive procedure
 //   reestablishAm()                — §5.2.2.1 (no stored context)
 //   reestablishAmWithStoredContext() — §5.2.2.1 (stored context)
 //
@@ -56,7 +56,7 @@ namespace lte
   RxClassification
   PdcpEntity::classifyRx(SN_t sn, uint32_t &out_hfn) const
   {
-    const SN_t window = snWindow(bearer_);
+    const SN_t window = pdcpSnWindow(pduType());
 
     // Signed-distance helper — cast to int64_t before subtracting
     // to avoid unsigned underflow.
@@ -139,7 +139,7 @@ namespace lte
   }
 
   // ============================================================
-  // rxPduAmNoReorder — TS 36.323 §5.1.2.1.2
+  // rxPduDrbAmNoReorder — TS 36.323 §5.1.2.1.2
   //
   // Step numbering below matches the spec text exactly so a reviewer
   // can read code and standard side-by-side.
@@ -149,34 +149,36 @@ namespace lte
   //   rx_deliv_ == SN of last SDU delivered upward
   //   rx_store_ keys are COUNT values (rx_hfn_ × mod + sn)
   // ============================================================
-  Status PdcpEntity::rxPduAmNoReorder(const uint8_t *raw_pdu,
-                                      size_t raw_len,
-                                      bool due_to_reestablishment)
+  Status PdcpEntity::rxPduDrbAmNoReorder(ByteBuffer pdu,
+                                         bool due_to_reestablishment)
   {
-    if (!raw_pdu || raw_len == 0)
+    if (!pdu.valid() || pdu.size() == 0)
       return Status::PARSE_ERROR;
 
     // ----------------------------------------------------------
     // Step 1 — Parse PDCP Data PDU header
     // ----------------------------------------------------------
-    PdcpPdu pdu;
-    Status parse_status = PdcpPduCodec::deserialize(raw_pdu, raw_len, bearer_, pdu);
+    PdcpHeader hdr;
+    Status parse_status = PdcpPduCodec::parseHeader(pdu.data(), pdu.size(),
+                                                    pduType(), hdr);
     if (parse_status != Status::OK)
     {
       metrics_.recordDrop();
       return parse_status;
     }
-    if (!pdu.isData())
+    if (!hdr.isData())
     {
       // Control PDU — not handled by this procedure
       return Status::OK;
     }
 
+    pdu.consume(hdr.header_size);
+
     // ----------------------------------------------------------
     // Step 2 — Classify received SN + determine HFN for decipher
     // ----------------------------------------------------------
     uint32_t decipher_hfn = 0;
-    const RxClassification cls = classifyRx(pdu.sn, decipher_hfn);
+    const RxClassification cls = classifyRx(hdr.sn, decipher_hfn);
 
     // ----------------------------------------------------------
     // Step 3 — Process by case
@@ -194,7 +196,7 @@ namespace lte
     }
 
     // ---- Cases B, C, D, E: run decipher + decompress ---------------
-    std::vector<uint8_t> sdu = decipherAndDecompress(pdu, decipher_hfn);
+    decipherAndDecompress(pdu, decipher_hfn);
 
     // ---- Case B: WrapAhead (Next – received > Reordering_Window) ---
     // HFN must be committed to state BEFORE decipher so that subsequent
@@ -202,7 +204,7 @@ namespace lte
     if (cls == RxClassification::WrapAhead)
     {
       rx_hfn_++; // COMMIT — permanent state change
-      rx_next_ = static_cast<SN_t>(pdu.sn + 1);
+      rx_next_ = static_cast<SN_t>(hdr.sn + 1);
     }
 
     // ---- Case D: ForwardInWindow — advance rx_next_ -----------------
@@ -211,8 +213,8 @@ namespace lte
     // then-check-zero to make the wrap condition self-documenting.
     if (cls == RxClassification::ForwardInWindow)
     {
-      const SN_t max_sn = static_cast<SN_t>(snModulus(bearer_) - 1);
-      if (pdu.sn >= max_sn)
+      const SN_t max_sn = static_cast<SN_t>(pdcpSnModulus(pduType()) - 1);
+      if (hdr.sn >= max_sn)
       {
         // Wrap: SN was at maximum, next SN is 0 → new HFN cycle
         rx_next_ = 0;
@@ -220,7 +222,7 @@ namespace lte
       }
       else
       {
-        rx_next_ = static_cast<SN_t>(pdu.sn + 1);
+        rx_next_ = static_cast<SN_t>(hdr.sn + 1);
       }
     }
 
@@ -231,8 +233,8 @@ namespace lte
     //
     // received_count = COUNT value for this PDU, used as key.
     // ----------------------------------------------------------
-    const uint32_t mod = snModulus(bearer_);
-    const uint32_t received_count = decipher_hfn * mod + pdu.sn;
+    const uint32_t mod = pdcpSnModulus(pduType());
+    const uint32_t received_count = decipher_hfn * mod + hdr.sn;
 
     // 4a. Duplicate check in rx_store_
     //     Spec: "if a PDCP SDU with the same PDCP SN is stored: discard"
@@ -244,7 +246,7 @@ namespace lte
     }
 
     // 4b. "store the PDCP SDU" — always first, before delivery branching
-    rx_store_[received_count] = std::move(sdu);
+    rx_store_[received_count] = std::move(pdu);
 
     // ----------------------------------------------------------
     // 4c. Delivery branching
@@ -258,7 +260,7 @@ namespace lte
       const auto it = rx_store_.find(count);
       if (it == rx_store_.end())
         return;
-      const std::vector<uint8_t> &payload = it->second;
+      ByteBuffer &payload = it->second;
 
       // Update Last_Submitted_PDCP_RX_SN
       rx_deliv_ = static_cast<SN_t>(count % mod);
@@ -267,7 +269,7 @@ namespace lte
       metrics_.recordRx(payload.size(), 0, metrics_.now_ns());
 
       // Populate test-only last-delivered storage
-      last_delivered_sdu_.assign(payload.begin(), payload.end());
+      last_delivered_sdu_.assign(payload.data(), payload.data() + payload.size());
 
       if (deliver_cb_)
       {
@@ -319,15 +321,15 @@ namespace lte
       //        OR received SN = Last_Submitted – Maximum_PDCP_SN:
       //          deliver consecutive SDUs starting from received COUNT"
 
-      const SN_t max_sn = static_cast<SN_t>(snModulus(bearer_) - 1);
+      const SN_t max_sn = static_cast<SN_t>(pdcpSnModulus(pduType()) - 1);
 
       // Two-vered is_next per spec:
       //   vere 1: sn == rx_deliv_ + 1
       //   vere 2: rx_deliv_ == Maximum_PDCP_SN && sn == 0
       //           (wrap: rx_deliv_ - Maximum_PDCP_SN = 0 = sn)
       const bool is_next =
-          (pdu.sn == static_cast<SN_t>((rx_deliv_ + 1) % (max_sn + 1))) ||
-          (rx_deliv_ == max_sn && pdu.sn == 0);
+          (hdr.sn == static_cast<SN_t>((rx_deliv_ + 1) % (max_sn + 1))) ||
+          (rx_deliv_ == max_sn && hdr.sn == 0);
 
       if (!is_next)
       {
@@ -348,8 +350,8 @@ namespace lte
     // Step 5 — Debug invariant assertions
     // ----------------------------------------------------------
 #ifndef NDEBUG
-    assert(rx_next_ <= static_cast<SN_t>(snModulus(bearer_) - 1));
-    assert(rx_deliv_ <= static_cast<SN_t>(snModulus(bearer_) - 1));
+    assert(rx_next_ <= static_cast<SN_t>(pdcpSnModulus(pduType()) - 1));
+    assert(rx_deliv_ <= static_cast<SN_t>(pdcpSnModulus(pduType()) - 1));
 #endif
 
     return Status::OK;
@@ -385,7 +387,7 @@ namespace lte
 
     rx_next_ = 0;
     rx_hfn_ = 0;
-    rx_deliv_ = static_cast<SN_t>(snModulus(bearer_) - 1);
+    rx_deliv_ = static_cast<SN_t>(pdcpSnModulus(pduType()) - 1);
 
     // TODO: apply new ciphering key when security infrastructure is live
   }

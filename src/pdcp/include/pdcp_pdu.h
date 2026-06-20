@@ -23,6 +23,7 @@ namespace lte
 
   // Maximum SDU size per TS 36.323
   constexpr size_t PDCP_MAX_SDU_SIZE = 8188;   // bytes
+  constexpr size_t MAX_PDCP_HEADER_SIZE = 8;   // bytes
   constexpr size_t PDCP_HEADER_SIZE_12BIT = 2; // bytes for 12-bit SN
   constexpr size_t PDCP_HEADER_SIZE_5BIT = 1;  // bytes for 5-bit SN
 
@@ -30,23 +31,32 @@ namespace lte
   constexpr uint8_t PDCP_DC_DATA = 1;
   constexpr uint8_t PDCP_DC_CONTROL = 0;
 
+  struct PdcpHeader
+  {
+    SN_t sn = 0; // sequence number
+    uint8_t dc = PDCP_DC_DATA;
+    size_t header_size = 0;
+
+    bool isData() const { return dc == PDCP_DC_DATA; }
+    bool isControl() const { return dc == PDCP_DC_CONTROL; }
+  };
   // ============================================================
   // PdcpPdu — in-memory representation of one PDCP PDU
   // Does NOT own the payload buffer; payload points into a
   // BufferPool block managed by PdcpEntity.
   // ============================================================
-  struct PdcpPdu
-  {
-    SN_t sn = 0; // sequence number
-    uint8_t dc = PDCP_DC_DATA;
-    BearerType bearer = BearerType::DRB;
+  // struct PdcpPdu
+  // {
+  //   SN_t sn = 0; // sequence number
+  //   uint8_t dc = PDCP_DC_DATA;
+  //   BearerType bearer = BearerType::DRB;
 
-    const uint8_t *payload = nullptr; // points into BufferPool block
-    size_t payload_len = 0;
+  //   const uint8_t *payload = nullptr; // points into BufferPool block
+  //   size_t payload_len = 0;
 
-    bool isData() const { return dc == PDCP_DC_DATA; }
-    bool isControl() const { return dc == PDCP_DC_CONTROL; }
-  };
+  //   bool isData() const { return dc == PDCP_DC_DATA; }
+  //   bool isControl() const { return dc == PDCP_DC_CONTROL; }
+  // };
 
   // ============================================================
   // PdcpPduCodec — serialise / deserialise PDUs to/from raw bytes
@@ -57,28 +67,24 @@ namespace lte
   public:
     // Serialise a PdcpPdu into out_buf.
     // Returns number of bytes written, or 0 on error.
-    // out_buf must be at least headerSize(pdu.bearer) + pdu.payload_len bytes.
-    static size_t serialize(const PdcpPdu &pdu,
-                            uint8_t *out_buf,
-                            size_t out_buf_size);
+    static size_t buildHeader(const PdcpHeader &hdr_pdu,
+                              uint8_t *hdr_buf,
+                              PdcpPduType type);
 
     // Deserialise raw bytes into a PdcpPdu.
-    // pdu.payload will point INSIDE raw_buf (zero-copy).
-    // Caller must ensure raw_buf lifetime exceeds pdu usage.
-    // Returns Status::OK or Status::PARSE_ERROR.
-    static Status deserialize(const uint8_t *raw_buf,
-                              size_t raw_len,
-                              BearerType bearer,
-                              PdcpPdu &out_pdu);
+    static Status parseHeader(const uint8_t *data,
+                              size_t len,
+                              PdcpPduType type,
+                              PdcpHeader &out_pdu);
 
     // Header size in bytes for a given bearer type
-    static size_t headerSize(BearerType bearer);
+    static size_t headerSize(PdcpPduType type);
 
   private:
-    static size_t serialize12(const PdcpPdu &pdu, uint8_t *buf, size_t sz);
-    static size_t serialize5(const PdcpPdu &pdu, uint8_t *buf, size_t sz);
-    static Status deserialize12(const uint8_t *buf, size_t len, PdcpPdu &out);
-    static Status deserialize5(const uint8_t *buf, size_t len, PdcpPdu &out);
+    static size_t serialize12(const PdcpHeader &hdr_pdu, uint8_t *buf);
+    static size_t serialize5(const PdcpHeader &hdr_pdu, uint8_t *buf);
+    static Status deserialize12(const uint8_t *buf, PdcpHeader &out);
+    static Status deserialize5(const uint8_t *buf, PdcpHeader &out);
   };
 
 } // namespace lte

@@ -16,31 +16,31 @@
 
 #include "pdcp_entity.h"
 
-namespace lte {
-
-// ============================================================
-// rxPduWithReorder — TS 36.323 §5.1.2.1.4 (STUB)
-// ============================================================
-Status PdcpEntity::rxPduWithReorder(const uint8_t* /*raw_pdu*/,
-                                     size_t         /*raw_len*/,
-                                     bool           /*due_to_reestablishment*/)
+namespace lte
 {
+
+  // ============================================================
+  // rxPduWithReorder — TS 36.323 §5.1.2.1.4 (STUB)
+  // ============================================================
+  Status PdcpEntity::rxPduWithReorder(ByteBuffer /*pdu*/,
+                                      bool /*due_to_reestablishment*/)
+  {
     // TODO: implement TS 36.323 §5.1.2.1.4
     return Status::NOT_IMPLEMENTED;
-}
+  }
 
-// ============================================================
-// reestablishWithReorder — TS 36.323 §5.2.2 (STUB)
-//
-// When implemented:
-//   Stop t-Reordering timer (if running).
-//   Flush rx_store_ (deliver or discard depending on spec branch).
-//   Reset relevant state variables.
-//   rohc_.resetDownlink();
-// ============================================================
-void PdcpEntity::reestablishWithReorder()
-{
+  // ============================================================
+  // reestablishWithReorder — TS 36.323 §5.2.2 (STUB)
+  //
+  // When implemented:
+  //   Stop t-Reordering timer (if running).
+  //   Flush rx_store_ (deliver or discard depending on spec branch).
+  //   Reset relevant state variables.
+  //   rohc_.resetDownlink();
+  // ============================================================
+  void PdcpEntity::reestablishWithReorder()
+  {
     // TODO: stop t-Reordering timer, flush buffer, reset state
-}
+  }
 
 } // namespace lte

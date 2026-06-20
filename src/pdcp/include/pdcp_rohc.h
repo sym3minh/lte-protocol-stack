@@ -19,13 +19,13 @@ namespace lte
     // data    : buffer containing the SDU (IP packet)
     // len     : in/out — updated if header is compressed
     // Returns true on success.
-    bool compress(uint8_t *data, size_t &len);
+    bool compress(uint8_t *data, size_t len);
 
     // Decompress ROHC-compressed header back to full IP header.
     // data    : buffer containing ROHC-compressed data
     // len     : in/out — updated after decompression
     // Returns true on success.
-    bool decompress(uint8_t *data, size_t &len);
+    bool decompress(uint8_t *data, size_t len);
 
     // Reset the downlink (RX-side) decompressor context.
     // Called on PDCP re-establishment per TS 36.323 §5.2.2.1.
@@ -34,7 +34,7 @@ namespace lte
 
     // Reset the uplink (TX-side) compressor context.
     // Called on PDCP re-establishment.
-    void resetUplink()   { /* TODO: reset compressor state machine */ }
+    void resetUplink() { /* TODO: reset compressor state machine */ }
 
     bool isEnabled() const { return enabled_; }
     void setEnabled(bool v) { enabled_ = v; }

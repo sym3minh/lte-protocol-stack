@@ -4,22 +4,21 @@
 // Unit tests for §5.1.2.1.2 (DRBs on RLC AM, no reordering).
 // Two test surfaces, each with its own fixture:
 //
-//   A. RxAmNoReorderTest — drives PdcpEntity (AmNoReorder mode) via raw
-//      PDUs built directly with buildRawPdu(sn, payload).  Allows seeding
-//      arbitrary RX state (rx_next/rx_hfn/rx_deliv) via resetWithState(),
-//      which is required to exercise wrap-around, Case B/E, and
-//      re-establishment paths without running thousands of TX packets.
-//      Covers classification cases A/B/C/D/E, delivery logic,
-//      re-establishment, wrap-around, and duplicates.
+//   A. RxAmNoReorderTest — drives PdcpEntity via raw PDUs built
+//      with buildRawPduBuffer(). Allows seeding arbitrary RX state
+//      via resetWithState(). Covers classification cases A/B/C/D/E,
+//      delivery logic, re-establishment, wrap-around, and duplicates.
 //
 //   B. AmNoReorderLoopbackTest — drives PdcpEntity end-to-end through
-//      txSdu → lastTxPdu → rxPdu, so encode and decode are exercised on
-//      the same entity.  Used for façade-level assertions: constructor
-//      RxMode selection, accessor pass-through, and stub modes returning
-//      NOT_IMPLEMENTED.
+//      txSdu(ByteBuffer) → MockRlcSap → rxPdu(ByteBuffer).
+//      Used for façade-level assertions.
 //
-// Test naming convention:
-//   [Surface]_[Scenario]_[ExpectedOutcome]
+// Refactored for zero-copy SAP:
+//   - PdcpConfig struct replaces positional constructor args
+//   - rxPdu(ByteBuffer) replaces rxPdu(raw*, len, bool)
+//   - txSdu(ByteBuffer) replaces txSdu(raw*, len)
+//   - MockRlcSap replaces lastTxPdu()
+//   - ByteBuffer allocated from shared pool
 // ============================================================
 
 #include <gtest/gtest.h>
@@ -34,92 +33,96 @@
 #include <cstdint>
 
 using namespace lte;
-using lte::test::buildRawPdu;
+using namespace lte::test;
 
 // ============================================================
-// Shared test infrastructure
+// Shared config builder
+// ============================================================
+static PdcpConfig makeAmDrbConfig()
+{
+  PdcpConfig cfg;
+  cfg.lcid = 1;
+  cfg.bearer = BearerType::DRB;
+  cfg.pdu_type = PdcpPduType::DRB_12bitSn;
+  cfg.rlc_mode = RlcMode::AM;
+  cfg.reordering_enabled = false;
+  return cfg;
+}
+
+// ============================================================
+// Surface A — RxAmNoReorderTest
 // ============================================================
 
-// RxAmNoReorderTest (Surface A) — creates a PdcpEntity in AmNoReorder mode
-// with spec-default initial state (rx_next=0, rx_hfn=0,
-// rx_deliv=Maximum_PDCP_SN).  Tests inject raw PDUs directly via
-// buildRawPdu(sn, payload), bypassing the TX path so any SN and any
-// initial state (set via resetWithState) can be exercised cheaply.
 class RxAmNoReorderTest : public ::testing::Test
 {
 protected:
-  static constexpr LCID_t lcid = 1;
-
   void SetUp() override
   {
-    pool = std::make_unique<BufferPool>(2048, 64);
-    entity = std::make_unique<PdcpEntity>(
-        lcid, BearerType::DRB, RlcMode::AM, *pool,
-        PdcpEntity::RxMode::AmNoReorder);
+    pool_ = std::make_unique<BufferPool>(2048, 64);
+    entity_ = std::make_unique<PdcpEntity>(makeAmDrbConfig());
 
-    entity->setDeliverCallback([this](const uint8_t *sdu, size_t len)
-                               { delivered.emplace_back(sdu, sdu + len); });
+    entity_->setDeliverCallback([this](const uint8_t *sdu, size_t len)
+                                { delivered.emplace_back(sdu, sdu + len); });
   }
 
-  // Convenience: build a raw PDU and inject it into the entity.
+  // Build raw PDU as ByteBuffer and inject into entity
   Status rx(SN_t sn, const std::string &payload = "X",
             bool reestablish = false)
   {
-    auto raw = buildRawPdu(sn, payload);
-    return entity->rxPdu(raw.data(), raw.size(), reestablish);
+    auto buf = buildRawPduBuffer(*pool_, sn, payload);
+    EXPECT_TRUE(buf.valid());
+    return entity_->rxPdu(std::move(buf), reestablish);
   }
 
-  // Convenience: rebuild entity with custom initial RX state.
-  // TX state defaults to 0 — not used by Surface A tests.
+  // Rebuild entity with custom initial RX state
   void resetWithState(SN_t rx_next, uint32_t rx_hfn, SN_t rx_deliv)
   {
     delivered.clear();
-    PdcpEntity::TestInitState init{
-        .rx_next = rx_next,
-        .rx_hfn = rx_hfn,
-        .rx_deliv = rx_deliv,
-        .tx_next = 0,
-        .tx_hfn = 0};
-    entity = std::make_unique<PdcpEntity>(
-        lcid, BearerType::DRB, RlcMode::AM, *pool,
-        PdcpEntity::RxMode::AmNoReorder, init);
+    PdcpEntity::TestInitState init{};
+    init.rx_next = rx_next;
+    init.rx_hfn = rx_hfn;
+    init.rx_deliv = rx_deliv;
+    init.tx_next = 0;
+    init.tx_hfn = 0;
 
-    entity->setDeliverCallback([this](const uint8_t *sdu, size_t len)
-                               { delivered.emplace_back(sdu, sdu + len); });
+    entity_ = std::make_unique<PdcpEntity>(makeAmDrbConfig(), init);
+
+    entity_->setDeliverCallback([this](const uint8_t *sdu, size_t len)
+                                { delivered.emplace_back(sdu, sdu + len); });
   }
 
-  std::unique_ptr<BufferPool> pool;
-  std::unique_ptr<PdcpEntity> entity;
+  std::unique_ptr<BufferPool> pool_;
+  std::unique_ptr<PdcpEntity> entity_;
 
   std::vector<std::vector<uint8_t>> delivered;
 };
 
-// AmNoReorderLoopbackTest (Surface B) — full PdcpEntity in AmNoReorder mode.
-// Provides loopback: txSdu → lastTxPdu → rxPdu.
+// ============================================================
+// Surface B — AmNoReorderLoopbackTest
+// ============================================================
+
 class AmNoReorderLoopbackTest : public ::testing::Test
 {
 protected:
   void SetUp() override
   {
-    pool = std::make_unique<BufferPool>(2048, 64);
-    entity = std::make_unique<PdcpEntity>(
-        1, BearerType::DRB, RlcMode::AM, *pool,
-        PdcpEntity::RxMode::AmNoReorder);
+    pool_ = std::make_unique<BufferPool>(2048, 64);
+    entity_ = std::make_unique<PdcpEntity>(makeAmDrbConfig());
+    entity_->set_lower_layer_sap(&mock_rlc_);
 
-    entity->setDeliverCallback([this](const uint8_t *sdu, size_t len)
-                               { delivered.emplace_back(sdu, sdu + len); });
+    entity_->setDeliverCallback([this](const uint8_t *sdu, size_t len)
+                                { delivered.emplace_back(sdu, sdu + len); });
   }
 
-  // Transmit one SDU and return the resulting raw PDU bytes.
+  // Transmit one SDU, capture the PDU bytes from MockRlcSap
   std::vector<uint8_t> makePdu(const std::string &payload)
   {
-    entity->txSdu(
-        reinterpret_cast<const uint8_t *>(payload.data()),
-        payload.size());
-    return entity->lastTxPdu();
+    auto sdu = makeSduBuffer(*pool_, payload);
+    entity_->txSdu(std::move(sdu));
+    return mock_rlc_.last_sdu;
   }
 
-  // Build N PDUs, return them without feeding to Rx side.
+  // Build N PDUs, return them without feeding to Rx side
   std::vector<std::vector<uint8_t>> makeNPdus(int n,
                                               const std::string &base = "p")
   {
@@ -129,8 +132,18 @@ protected:
     return pdus;
   }
 
-  std::unique_ptr<BufferPool> pool;
-  std::unique_ptr<PdcpEntity> entity;
+  // Re-inject captured PDU bytes into rxPdu as ByteBuffer
+  Status reinjectPdu(const std::vector<uint8_t> &pdu_bytes,
+                     bool reestablish = false)
+  {
+    auto buf = ByteBuffer::allocate(*pool_, pdu_bytes.size(), DEFAULT_HEADROOM);
+    buf.append(pdu_bytes.data(), pdu_bytes.size());
+    return entity_->rxPdu(std::move(buf), reestablish);
+  }
+
+  std::unique_ptr<BufferPool> pool_;
+  MockRlcSap mock_rlc_;
+  std::unique_ptr<PdcpEntity> entity_;
   std::vector<std::vector<uint8_t>> delivered;
 };
 
@@ -144,10 +157,9 @@ protected:
 
 TEST_F(RxAmNoReorderTest, InitialState_MatchesSpec)
 {
-  // §5.2.2.1: rx_next=0, rx_hfn=0, rx_deliv=Maximum_PDCP_SN (4095 for DRB)
-  EXPECT_EQ(entity->rxNext(), 0u);
-  EXPECT_EQ(entity->rxHfn(), 0u);
-  EXPECT_EQ(entity->rxDeliv(), static_cast<SN_t>(SN_MAX_12BIT - 1)); // 4095
+  EXPECT_EQ(entity_->rxNext(), 0u);
+  EXPECT_EQ(entity_->rxHfn(), 0u);
+  EXPECT_EQ(entity_->rxDeliv(), static_cast<SN_t>(SN_MAX_12BIT - 1)); // 4095
 }
 
 // ------------------------------------------------------------
@@ -156,31 +168,26 @@ TEST_F(RxAmNoReorderTest, InitialState_MatchesSpec)
 
 TEST_F(RxAmNoReorderTest, CaseD_NormalForward_DeliveredImmediately)
 {
-  // rx_deliv=4095, rx_next=0.  SN=0: recv_minus_last = 0-4095 = -4095
-  // vere1: -4095 > 2048? No.  vere2: 4095-0=4095 ≥ 0 && < 2048? No (4095 ≥ 2048).
-  // → NOT OutsideWindow → Case D (SN=0 ≥ rx_next=0).
   ASSERT_EQ(rx(0, "hello"), Status::OK);
   ASSERT_EQ(delivered.size(), 1u);
   EXPECT_EQ(std::string(delivered[0].begin(), delivered[0].end()), "hello");
-  EXPECT_EQ(entity->rxNext(), 1u);
-  EXPECT_EQ(entity->rxDeliv(), 0u);
+  EXPECT_EQ(entity_->rxNext(), 1u);
+  EXPECT_EQ(entity_->rxDeliv(), 0u);
 }
 
 // ------------------------------------------------------------
 // A3. Case E — BehindSameHfn: late arrival, same HFN
-// Bug fix: must use rx_hfn_ (NOT rx_hfn_ - 1)
 // ------------------------------------------------------------
 
 TEST_F(RxAmNoReorderTest, CaseE_BehindSameHfn_UsesCorrectHfn)
 {
-  // simulate: p0, p1 delivered earlier; rx_next advanced past missing p2, p3
   resetWithState(/*rx_next*/ 4, /*rx_hfn*/ 0, /*rx_deliv*/ 1);
   ASSERT_EQ(rx(2, "p2"), Status::OK);
 
   ASSERT_EQ(delivered.size(), 1u);
-  EXPECT_EQ(entity->rxDeliv(), SN_t{2});
-  EXPECT_EQ(entity->rxNext(), SN_t{4});
-  EXPECT_EQ(entity->rxHfn(), 0u);
+  EXPECT_EQ(entity_->rxDeliv(), SN_t{2});
+  EXPECT_EQ(entity_->rxNext(), SN_t{4});
+  EXPECT_EQ(entity_->rxHfn(), 0u);
 }
 
 // ------------------------------------------------------------
@@ -189,14 +196,11 @@ TEST_F(RxAmNoReorderTest, CaseE_BehindSameHfn_UsesCorrectHfn)
 
 TEST_F(RxAmNoReorderTest, CaseA_Vere2_SnEqualsRxDeliv_Discarded)
 {
-  // Default: rx_deliv_=4095.  Inject SN=4095.
-  // last_minus_recv = 4095-4095 = 0 → 0 ≥ 0 && 0 < 2048 → vere2 → OutsideWindow.
   ASSERT_EQ(rx(4095, "dup"), Status::OK);
-  EXPECT_EQ(delivered.size(), 0u); // discard — no delivery
-  // State variables must NOT change
-  EXPECT_EQ(entity->rxNext(), 0u);
-  EXPECT_EQ(entity->rxDeliv(), SN_t{SN_MAX_12BIT - 1}); // still 4095
-  EXPECT_EQ(entity->rxHfn(), 0u);
+  EXPECT_EQ(delivered.size(), 0u);
+  EXPECT_EQ(entity_->rxNext(), 0u);
+  EXPECT_EQ(entity_->rxDeliv(), SN_t{SN_MAX_12BIT - 1});
+  EXPECT_EQ(entity_->rxHfn(), 0u);
 }
 
 // ------------------------------------------------------------
@@ -205,15 +209,13 @@ TEST_F(RxAmNoReorderTest, CaseA_Vere2_SnEqualsRxDeliv_Discarded)
 
 TEST_F(RxAmNoReorderTest, CaseA_Vere2_DuplicatePdu_Discarded)
 {
-  // Receive SN=0 once → rx_deliv_=0.
   ASSERT_EQ(rx(0, "first"), Status::OK);
   ASSERT_EQ(delivered.size(), 1u);
 
-  // SN=0 again: last_minus_recv = 0-0 = 0 → vere2 → OutsideWindow.
   ASSERT_EQ(rx(0, "dup"), Status::OK);
-  EXPECT_EQ(delivered.size(), 1u); // no second delivery
-  EXPECT_EQ(entity->rxDeliv(), SN_t{0});
-  EXPECT_EQ(entity->rxNext(), SN_t{1});
+  EXPECT_EQ(delivered.size(), 1u);
+  EXPECT_EQ(entity_->rxDeliv(), SN_t{0});
+  EXPECT_EQ(entity_->rxNext(), SN_t{1});
 }
 
 // ------------------------------------------------------------
@@ -222,15 +224,9 @@ TEST_F(RxAmNoReorderTest, CaseA_Vere2_DuplicatePdu_Discarded)
 
 TEST_F(RxAmNoReorderTest, CaseA_Vere2_Boundary_SnAtRxDelivPlusWindow_Discarded)
 {
-  // Drive rx_deliv_ to 0 by receiving SN=0.
   ASSERT_EQ(rx(0), Status::OK);
-  // rx_deliv_=0.  SN=2048 (= Reordering_Window): last_minus_recv = 0-2048 = -2048.
-  // vere2 requires last_minus_recv >= 0, so -2048 < 0 → vere2 false.
-  // recv_minus_last = 2048-0 = 2048 = window (NOT > window) → vere1 false.
-  // → NOT OutsideWindow → ForwardInWindow.
-  // SN=2048 is IN-WINDOW (barely).  Verify it is accepted.
   ASSERT_EQ(rx(2048), Status::OK);
-  EXPECT_EQ(entity->rxDeliv(), SN_t{2048}); // delivered and advanced
+  EXPECT_EQ(entity_->rxDeliv(), SN_t{2048});
 }
 
 // ------------------------------------------------------------
@@ -239,21 +235,15 @@ TEST_F(RxAmNoReorderTest, CaseA_Vere2_Boundary_SnAtRxDelivPlusWindow_Discarded)
 
 TEST_F(RxAmNoReorderTest, CaseA_Vere1_SnOneAheadOfWindow_Discarded)
 {
-  // Drive rx_deliv_ to 0.
   ASSERT_EQ(rx(0), Status::OK);
-  // SN=2049: recv_minus_last = 2049 > 2048 → vere1 → OutsideWindow.
-  const SN_t rx_deliv_before = entity->rxDeliv();
+  const SN_t rx_deliv_before = entity_->rxDeliv();
   ASSERT_EQ(rx(2049, "discard"), Status::OK);
-  EXPECT_EQ(entity->rxDeliv(), rx_deliv_before); // unchanged
+  EXPECT_EQ(entity_->rxDeliv(), rx_deliv_before);
   EXPECT_EQ(delivered.size(), 1u);
 }
 
 // ------------------------------------------------------------
-// A8. Case A after wrap-around (vere 1 spec):
-//   rx_deliv_=10, rx_next_=11, rx_hfn_=1
-//   inject SN=4090 (recv_minus_last=4090-10=4080 > 2048 → vere1)
-//   Expect: decipher (with rx_hfn_-1=0 because sn=4090 > rx_next_=11),
-//           discard; state unchanged, rx_store_ not touched.
+// A8. Case A after wrap-around (vere 1 spec)
 // ------------------------------------------------------------
 
 TEST_F(RxAmNoReorderTest, CaseA_AfterWrapAround_Vere1_StateUnchanged)
@@ -262,16 +252,13 @@ TEST_F(RxAmNoReorderTest, CaseA_AfterWrapAround_Vere1_StateUnchanged)
 
   ASSERT_EQ(rx(4090, "discard"), Status::OK);
   EXPECT_EQ(delivered.size(), 0u);
-  EXPECT_EQ(entity->rxNext(), SN_t{11});
-  EXPECT_EQ(entity->rxHfn(), 1u);
-  EXPECT_EQ(entity->rxDeliv(), SN_t{10});
+  EXPECT_EQ(entity_->rxNext(), SN_t{11});
+  EXPECT_EQ(entity_->rxHfn(), 1u);
+  EXPECT_EQ(entity_->rxDeliv(), SN_t{10});
 }
 
 // ------------------------------------------------------------
-// A9. Case A duplicate same HFN (vere 2 spec):
-//   rx_deliv_=100, rx_next_=101, rx_hfn_=0
-//   inject SN=50 (last_minus_recv=100-50=50; 0 ≤ 50 < 2048 → vere2)
-//   Expect: decipher with rx_hfn_=0, discard; state unchanged.
+// A9. Case A duplicate same HFN (vere 2 spec)
 // ------------------------------------------------------------
 
 TEST_F(RxAmNoReorderTest, CaseA_DuplicateSameHfn_Vere2_StateUnchanged)
@@ -280,9 +267,9 @@ TEST_F(RxAmNoReorderTest, CaseA_DuplicateSameHfn_Vere2_StateUnchanged)
 
   ASSERT_EQ(rx(50, "old"), Status::OK);
   EXPECT_EQ(delivered.size(), 0u);
-  EXPECT_EQ(entity->rxNext(), SN_t{101});
-  EXPECT_EQ(entity->rxHfn(), 0u);
-  EXPECT_EQ(entity->rxDeliv(), SN_t{100});
+  EXPECT_EQ(entity_->rxNext(), SN_t{101});
+  EXPECT_EQ(entity_->rxHfn(), 0u);
+  EXPECT_EQ(entity_->rxDeliv(), SN_t{100});
 }
 
 // ------------------------------------------------------------
@@ -295,10 +282,9 @@ TEST_F(RxAmNoReorderTest, CaseD_WrapAround_HfnIncrements)
 
   ASSERT_EQ(rx(4095, "wrap"), Status::OK);
 
-  // After wrap: rx_next_=0, rx_hfn_=1, rx_deliv_=4095
-  EXPECT_EQ(entity->rxNext(), SN_t{0});
-  EXPECT_EQ(entity->rxHfn(), 1u);
-  EXPECT_EQ(entity->rxDeliv(), SN_t{4095});
+  EXPECT_EQ(entity_->rxNext(), SN_t{0});
+  EXPECT_EQ(entity_->rxHfn(), 1u);
+  EXPECT_EQ(entity_->rxDeliv(), SN_t{4095});
   EXPECT_EQ(delivered.size(), 1u);
 }
 
@@ -308,15 +294,12 @@ TEST_F(RxAmNoReorderTest, CaseD_WrapAround_HfnIncrements)
 
 TEST_F(RxAmNoReorderTest, CaseB_WrapAhead_HfnCommittedToState)
 {
-  // rx_next_=2050, rx_hfn_=0, rx_deliv_=2049
-  // SN=1: next_minus_recv = 2050-1 = 2049 > 2048 → Case B.
   resetWithState(/*rx_next=*/2050, /*rx_hfn=*/0, /*rx_deliv=*/2049);
 
   ASSERT_EQ(rx(1, "wrapB"), Status::OK);
 
-  // rx_hfn_ must be committed to 1 (not just local to decipher call)
-  EXPECT_EQ(entity->rxHfn(), 1u);
-  EXPECT_EQ(entity->rxNext(), SN_t{2}); // sn+1 = 1+1 = 2
+  EXPECT_EQ(entity_->rxHfn(), 1u);
+  EXPECT_EQ(entity_->rxNext(), SN_t{2});
   EXPECT_EQ(delivered.size(), 1u);
 }
 
@@ -328,18 +311,16 @@ TEST_F(RxAmNoReorderTest, NormalDelivery_StoreThenFlush_OldStoredAndCurrent)
 {
   resetWithState(/*rx_next=*/4, /*rx_hfn=*/0, /*rx_deliv=*/3);
 
-  // Store SN=5 without delivering (reestablish=true, is_next=false: 5 ≠ 3+1=4)
   ASSERT_EQ(rx(5, "sdu5", /*reestablish=*/true), Status::OK);
-  EXPECT_EQ(delivered.size(), 0u); // not delivered yet
+  EXPECT_EQ(delivered.size(), 0u);
 
-  // Normal inject SN=7: flush COUNT<7 (SN=5), then consecutive from 7 (SN=7).
   ASSERT_EQ(rx(7, "sdu7", /*reestablish=*/false), Status::OK);
 
   ASSERT_EQ(delivered.size(), 2u);
   EXPECT_EQ(std::string(delivered[0].begin(), delivered[0].end()), "sdu5");
   EXPECT_EQ(std::string(delivered[1].begin(), delivered[1].end()), "sdu7");
 
-  EXPECT_EQ(entity->rxDeliv(), SN_t{7});
+  EXPECT_EQ(entity_->rxDeliv(), SN_t{7});
 }
 
 // ------------------------------------------------------------
@@ -352,7 +333,7 @@ TEST_F(RxAmNoReorderTest, Reestablishment_SimpleNext_Delivered)
 
   ASSERT_EQ(rx(11, "sdu11", /*reestablish=*/true), Status::OK);
   ASSERT_EQ(delivered.size(), 1u);
-  EXPECT_EQ(entity->rxDeliv(), SN_t{11});
+  EXPECT_EQ(entity_->rxDeliv(), SN_t{11});
 }
 
 // ------------------------------------------------------------
@@ -365,7 +346,7 @@ TEST_F(RxAmNoReorderTest, Reestablishment_NotNext_Stored_NotDelivered)
 
   ASSERT_EQ(rx(13, "sdu13", /*reestablish=*/true), Status::OK);
   EXPECT_EQ(delivered.size(), 0u);
-  EXPECT_EQ(entity->rxDeliv(), SN_t{10}); // unchanged
+  EXPECT_EQ(entity_->rxDeliv(), SN_t{10});
 }
 
 // ------------------------------------------------------------
@@ -382,14 +363,14 @@ TEST_F(RxAmNoReorderTest, Reestablishment_StoreThenFlushConsecutive)
 
   ASSERT_EQ(rx(11, "sdu11", true), Status::OK);
   EXPECT_EQ(delivered.size(), 1u);
-  EXPECT_EQ(entity->rxDeliv(), SN_t{11});
+  EXPECT_EQ(entity_->rxDeliv(), SN_t{11});
 
   ASSERT_EQ(rx(12, "sdu12", true), Status::OK);
   ASSERT_EQ(delivered.size(), 4u);
   EXPECT_EQ(std::string(delivered[1].begin(), delivered[1].end()), "sdu12");
   EXPECT_EQ(std::string(delivered[2].begin(), delivered[2].end()), "sdu13");
   EXPECT_EQ(std::string(delivered[3].begin(), delivered[3].end()), "sdu14");
-  EXPECT_EQ(entity->rxDeliv(), SN_t{14});
+  EXPECT_EQ(entity_->rxDeliv(), SN_t{14});
 }
 
 // ------------------------------------------------------------
@@ -398,17 +379,16 @@ TEST_F(RxAmNoReorderTest, Reestablishment_StoreThenFlushConsecutive)
 
 TEST_F(RxAmNoReorderTest, Reestablishment_WrapAround_Vere2_Delivered)
 {
-  const SN_t max_sn = static_cast<SN_t>(SN_MAX_12BIT - 1); // 4095
+  const SN_t max_sn = static_cast<SN_t>(SN_MAX_12BIT - 1);
   resetWithState(/*rx_next=*/0, /*rx_hfn=*/1, /*rx_deliv=*/max_sn);
 
-  // SN=0: is_next vere2 (rx_deliv_==4095 && sn==0) → true → deliver.
   ASSERT_EQ(rx(0, "sdu0", /*reestablish=*/true), Status::OK);
   ASSERT_EQ(delivered.size(), 1u);
-  EXPECT_EQ(entity->rxDeliv(), SN_t{0});
+  EXPECT_EQ(entity_->rxDeliv(), SN_t{0});
 }
 
 // ------------------------------------------------------------
-// A17. Re-establishment — duplicate in store: second inject discarded
+// A17. Re-establishment — duplicate in store
 // ------------------------------------------------------------
 
 TEST_F(RxAmNoReorderTest, Reestablishment_DuplicateInStore_Discarded)
@@ -420,7 +400,7 @@ TEST_F(RxAmNoReorderTest, Reestablishment_DuplicateInStore_Discarded)
 
   ASSERT_EQ(rx(13, "dup", true), Status::OK);
   EXPECT_EQ(delivered.size(), 0u);
-  EXPECT_EQ(entity->rxDeliv(), SN_t{10});
+  EXPECT_EQ(entity_->rxDeliv(), SN_t{10});
 }
 
 // ------------------------------------------------------------
@@ -445,70 +425,66 @@ TEST_F(RxAmNoReorderTest, Reestablish_ClearsStore)
   ASSERT_EQ(rx(13, "stored", true), Status::OK);
   EXPECT_EQ(delivered.size(), 0u);
 
-  // Trigger reestablish (no stored context)
-  entity->reestablish();
+  entity_->reestablish();
 
-  // rx_deliv_ should still be 10 (no stored context reset).
-  // SN=11 is_next=(11==10+1=11) → true → deliver.
   ASSERT_EQ(rx(11, "new11", true), Status::OK);
-  EXPECT_EQ(delivered.size(), 1u); // SN=13 was cleared, only SN=11 delivered
+  EXPECT_EQ(delivered.size(), 1u);
 }
 
 // ------------------------------------------------------------
 // A20. Reestablish() with stored context — resets all state
-//
-// Note: reestablishAmWithStoredContext() is a private method on
-// PdcpEntity.  It is tested indirectly here via the TestInitState
-// path: seed a known non-default state, verify accessors, then
-// construct a fresh entity (simulating the post-reset condition).
-//
-// Direct testing of the private method is left to integration tests
-// or a future friend-class test accessor if needed.
 // ------------------------------------------------------------
 
 TEST_F(RxAmNoReorderTest, Reestablish_StoredContext_ResetsState)
 {
-  // Seed non-default state
   resetWithState(11, 0, 10);
 
-  // Rebuild entity with §5.2.2.1 default values — simulates
-  // what reestablishAmWithStoredContext() would produce.
   resetWithState(/*rx_next=*/0, /*rx_hfn=*/0,
                  /*rx_deliv=*/static_cast<SN_t>(SN_MAX_12BIT - 1));
 
-  EXPECT_EQ(entity->rxNext(), SN_t{0});
-  EXPECT_EQ(entity->rxHfn(), 0u);
-  EXPECT_EQ(entity->rxDeliv(), static_cast<SN_t>(SN_MAX_12BIT - 1)); // 4095
+  EXPECT_EQ(entity_->rxNext(), SN_t{0});
+  EXPECT_EQ(entity_->rxHfn(), 0u);
+  EXPECT_EQ(entity_->rxDeliv(), static_cast<SN_t>(SN_MAX_12BIT - 1));
 }
 
 // ============================================================
-// B. PdcpEntity façade tests
+// B. PdcpEntity façade tests — Surface B
 // ============================================================
 
 // ------------------------------------------------------------
-// B1. Constructor with AmNoReorder — initial rxDeliv matches §5.2.2.1
+// B1. Constructor — initial rxDeliv matches §5.2.2.1
 // ------------------------------------------------------------
 
 TEST_F(AmNoReorderLoopbackTest, Constructor_AmNoReorder_InitialStateCorrect)
 {
-  EXPECT_EQ(entity->rxNext(), SN_t{0});
-  EXPECT_EQ(entity->rxHfn(), 0u);
-  EXPECT_EQ(entity->rxDeliv(), static_cast<SN_t>(SN_MAX_12BIT - 1));
+  EXPECT_EQ(entity_->rxNext(), SN_t{0});
+  EXPECT_EQ(entity_->rxHfn(), 0u);
+  EXPECT_EQ(entity_->rxDeliv(), static_cast<SN_t>(SN_MAX_12BIT - 1));
 }
 
 // ------------------------------------------------------------
-// B2. Constructor with WithReorder — rxPdu returns NOT_IMPLEMENTED
+// B2. Constructor with reordering enabled — rxPdu returns NOT_IMPLEMENTED
 // ------------------------------------------------------------
 
 TEST(EntityFacadeTest, Constructor_WithReorder_ReturnsNotImplemented)
 {
   BufferPool pool(2048, 8);
-  PdcpEntity e(1, BearerType::DRB, RlcMode::AM, pool,
-               PdcpEntity::RxMode::WithReorder);
 
+  PdcpConfig cfg;
+  cfg.lcid = 1;
+  cfg.bearer = BearerType::DRB;
+  cfg.pdu_type = PdcpPduType::DRB_12bitSn;
+  cfg.rlc_mode = RlcMode::AM;
+  cfg.reordering_enabled = true;
+
+  PdcpEntity e(cfg);
+
+  // Build a minimal valid PDU as ByteBuffer
   const uint8_t dummy[] = {0x80, 0x00, 'X'};
-  EXPECT_EQ(e.rxPdu(dummy, sizeof(dummy)),
-            Status::NOT_IMPLEMENTED);
+  auto buf = ByteBuffer::allocate(pool, sizeof(dummy), DEFAULT_HEADROOM);
+  buf.append(dummy, sizeof(dummy));
+
+  EXPECT_EQ(e.rxPdu(std::move(buf)), Status::NOT_IMPLEMENTED);
 }
 
 // ------------------------------------------------------------
@@ -518,9 +494,9 @@ TEST(EntityFacadeTest, Constructor_WithReorder_ReturnsNotImplemented)
 TEST_F(AmNoReorderLoopbackTest, Passthrough_RxPdu_DeliveryWorks)
 {
   auto pdu = makePdu("loopback");
-  ASSERT_EQ(entity->rxPdu(pdu.data(), pdu.size()), Status::OK);
+  ASSERT_EQ(reinjectPdu(pdu), Status::OK);
 
-  const auto &sdu = entity->lastDeliveredSdu();
+  const auto &sdu = entity_->lastDeliveredSdu();
   EXPECT_EQ(std::string(sdu.begin(), sdu.end()), "loopback");
 }
 
@@ -531,28 +507,25 @@ TEST_F(AmNoReorderLoopbackTest, Passthrough_RxPdu_DeliveryWorks)
 TEST_F(AmNoReorderLoopbackTest, Passthrough_RxAccessors_MatchProcedureState)
 {
   auto pdu = makePdu("state_check");
-  ASSERT_EQ(entity->rxPdu(pdu.data(), pdu.size()), Status::OK);
+  ASSERT_EQ(reinjectPdu(pdu), Status::OK);
 
-  // After first PDU (SN=0): rx_next_=1, rx_deliv_=0
-  EXPECT_EQ(entity->rxNext(), SN_t{1});
-  EXPECT_EQ(entity->rxDeliv(), SN_t{0});
-  EXPECT_EQ(entity->rxHfn(), 0u);
+  EXPECT_EQ(entity_->rxNext(), SN_t{1});
+  EXPECT_EQ(entity_->rxDeliv(), SN_t{0});
+  EXPECT_EQ(entity_->rxHfn(), 0u);
 }
 
 // ------------------------------------------------------------
-// B5. Reestablish pass-through — clears state as expected
+// B5. Reestablish pass-through
 // ------------------------------------------------------------
 
 TEST_F(AmNoReorderLoopbackTest, Reestablish_Passthrough_DelegatesToProcedure)
 {
   auto pdu = makePdu("a");
-  ASSERT_EQ(entity->rxPdu(pdu.data(), pdu.size()), Status::OK);
+  ASSERT_EQ(reinjectPdu(pdu), Status::OK);
 
-  entity->reestablish();
+  entity_->reestablish();
 
-  // ROHC reset + rx_store_ cleared, but state variables preserved
-  // (no stored context).  rxDeliv should still be 0 from the received PDU.
-  EXPECT_EQ(entity->rxDeliv(), SN_t{0});
+  EXPECT_EQ(entity_->rxDeliv(), SN_t{0});
 }
 
 // ------------------------------------------------------------
@@ -563,8 +536,7 @@ TEST_F(AmNoReorderLoopbackTest, Passthrough_ReestablishmentFlag_ForwardedToProce
 {
   auto pdu = makePdu("reestab");
 
-  // SN=0 is is_next relative to rx_deliv_=4095 (vere2: rx_deliv_==4095 && sn==0).
-  ASSERT_EQ(entity->rxPdu(pdu.data(), pdu.size(), true), Status::OK);
+  ASSERT_EQ(reinjectPdu(pdu, /*reestablish=*/true), Status::OK);
   EXPECT_EQ(delivered.size(), 1u);
 }
 
@@ -577,13 +549,13 @@ TEST_F(AmNoReorderLoopbackTest, Loopback_TenPackets_AllDelivered)
   auto pdus = makeNPdus(10);
   for (auto &p : pdus)
   {
-    ASSERT_EQ(entity->rxPdu(p.data(), p.size()), Status::OK);
+    ASSERT_EQ(reinjectPdu(p), Status::OK);
   }
   EXPECT_EQ(delivered.size(), 10u);
 }
 
 // ------------------------------------------------------------
-// B8. Loopback: out-of-order delivery (existing regression guard)
+// B8. Loopback: out-of-order delivery
 // ------------------------------------------------------------
 
 TEST_F(AmNoReorderLoopbackTest, Loopback_OutOfOrder_DeliveredInSNOrder)
@@ -593,18 +565,15 @@ TEST_F(AmNoReorderLoopbackTest, Loopback_OutOfOrder_DeliveredInSNOrder)
   auto p2 = makePdu("p2");
   auto p3 = makePdu("p3");
 
-  entity->rxPdu(p0.data(), p0.size());
-  entity->rxPdu(p1.data(), p1.size());
-  entity->rxPdu(p3.data(), p3.size()); // gap at p2
-  EXPECT_EQ(entity->rxPdu(p2.data(), p2.size()), Status::OK);
+  reinjectPdu(p0);
+  reinjectPdu(p1);
+  reinjectPdu(p3); // gap at p2
+  EXPECT_EQ(reinjectPdu(p2), Status::OK);
 
-  // In Clause 5.1.2.1.2, the PDCP does not automatically reorder if the
-  // lower level delivers incorrectly.  This clause is only used when the
-  // lower level (RLC AM) has committed to delivering in the correct order.
   ASSERT_EQ(delivered.size(), 3u);
 
   EXPECT_EQ(std::string(delivered[0].begin(), delivered[0].end()), "p0");
   EXPECT_EQ(std::string(delivered[1].begin(), delivered[1].end()), "p1");
   EXPECT_EQ(std::string(delivered[2].begin(), delivered[2].end()), "p3");
-  EXPECT_EQ(entity->getMetrics().dropped_packets, 1u);
+  EXPECT_EQ(entity_->getMetrics().dropped_packets, 1u);
 }
