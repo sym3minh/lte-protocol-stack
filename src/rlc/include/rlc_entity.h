@@ -50,3 +50,27 @@ namespace lte
     rlc_rx_upper_layer_data_notifier *upper_dn_ = nullptr;
   };
 }
+
+//         TX path (PULL)              RX path (PUSH)
+//         ───────────────             ───────────────
+//         ┌────────┐                  ┌────────┐
+//         │  PDCP  │                  │  PDCP  │
+//         │   TX   │                  │   RX   │
+//         └───┬────┘                  └────▲───┘
+//             │                            │
+//             │ handle_sdu()               │ on_new_pdu()
+//             │ ◄── PDCP gọi               │ ◄── RLC gọi
+//             ▼                            │
+//         ┌────────┐                  ┌────────┐
+//         │  RLC   │                  │  RLC   │
+//         │ TM TX  │                  │ TM RX  │
+//         └───▲────┘                  └────▲───┘
+//             │                            │
+//             │ buildPdu()                 │ rxPdu()
+//             │ bufferOccupancy()          │ ◄── MAC gọi
+//             │ ◄── MAC gọi                │
+//             │                            │
+//         ┌───┴────┐                  ┌────┴───┐
+//         │  MAC   │                  │  MAC   │
+//         │   TX   │                  │   RX   │
+//         └────────┘                  └────────┘

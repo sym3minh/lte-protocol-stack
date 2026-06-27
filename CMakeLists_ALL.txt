@@ -17,6 +17,22 @@ add_library(lte_common STATIC
 target_include_directories(lte_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 ----------------------------------------------------------------------------------
+#source/src/bearer
+add_library(lte_bearer STATIC
+    src/radio_bearer.cpp
+)
+target_include_directories(lte_bearer PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(lte_bearer PUBLIC lte_pdcp lte_rlc lte_mac lte_common)
+
+----------------------------------------------------------------------------------
+#source/src/mac
+add_library(lte_mac STATIC
+    src/mac_stub.cpp        
+)
+target_include_directories(lte_mac PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(lte_mac PUBLIC lte_rlc lte_common)
+
+----------------------------------------------------------------------------------
 #source/src/pdcp/CMakeLists.txt
 set(PDCP_SOURCES
     src/pdcp_entity.cpp
@@ -35,6 +51,7 @@ target_link_libraries(lte_pdcp PUBLIC lte_common lte_metrics)
 #source/src/rlc/CMakeLists.txt
 add_library(lte_rlc STATIC
     src/rlc_pdu.cpp
+    src/rlc_tm.cpp
 )
 target_include_directories(lte_rlc PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(lte_rlc PUBLIC lte_common lte_metrics)
@@ -45,6 +62,8 @@ add_subdirectory(common)
 add_subdirectory(metrics)
 add_subdirectory(pdcp)
 add_subdirectory(rlc)
+add_subdirectory(mac)
+add_subdirectory(bearer)
 
 ----------------------------------------------------------------------------------
 # source/tests/fixtures/CMakeLists.txt
@@ -73,9 +92,17 @@ lte_add_unit_test(
     LABELS  "integration;pdcp"
 )
 
+lte_add_unit_test(
+    NAME    pdcp_rlc_tm_loopback_test
+    SOURCES pdcp_rlc_tm_loopback_test.cpp
+    LIBS    lte_bearer lte_mac lte_pdcp lte_rlc lte_common test_fixtures
+    LABELS  "integration;rlc;pdcp"
+)
+
 add_custom_target(integration_tests
     DEPENDS
         pdcp_loopback_test
+        pdcp_rlc_tm_loopback_test
 )
 
 ----------------------------------------------------------------------------------
@@ -158,9 +185,17 @@ lte_add_unit_test(
     LABELS "unit;rlc"
 )
 
+lte_add_unit_test(
+    NAME    rlc_tm_test
+    SOURCES rlc_tm_test.cpp
+    LIBS    lte_rlc lte_common test_fixtures
+    LABELS  "unit;rlc"
+)
+
 add_custom_target(rlc_unit_tests
     DEPENDS
         rlc_pdu_test
+        rlc_tm_test
 )
 
 ----------------------------------------------------------------------------------

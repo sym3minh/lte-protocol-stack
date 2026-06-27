@@ -24,7 +24,15 @@ lte_add_unit_test(
     LABELS  "integration;pdcp"
 )
 
+lte_add_unit_test(
+    NAME    pdcp_rlc_tm_loopback_test
+    SOURCES pdcp_rlc_tm_loopback_test.cpp
+    LIBS    lte_bearer lte_mac lte_pdcp lte_rlc lte_common test_fixtures
+    LABELS  "integration;rlc;pdcp"
+)
+
 add_custom_target(integration_tests
     DEPENDS
         pdcp_loopback_test
+        pdcp_rlc_tm_loopback_test
 )
